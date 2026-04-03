@@ -31,13 +31,17 @@ export class SigilClient {
     url.searchParams.set('limit', String(limit))
     url.searchParams.set('sort', 'relevance')
 
-    const res = await fetch(url.toString())
+    const res = await fetch(url.toString(), {
+      headers: { 'Authorization': `Bearer ${this.deployToken}` },
+    })
     if (!res.ok) throw new Error(`Sigil query failed: ${res.status}`)
     return res.json()
   }
 
   async inspect(name: string): Promise<any> {
-    const res = await fetch(`${this.baseUrl}/_api/inspect/${name}`)
+    const res = await fetch(`${this.baseUrl}/_api/inspect/${name}`, {
+      headers: { 'Authorization': `Bearer ${this.deployToken}` },
+    })
     if (!res.ok) throw new Error(`Sigil inspect failed: ${res.status}`)
     return res.json()
   }
@@ -74,7 +78,9 @@ export class SigilClient {
       url.searchParams.set(k, String(v))
     }
 
-    const res = await fetch(url.toString())
+    const res = await fetch(url.toString(), {
+      headers: { 'Authorization': `Bearer ${this.deployToken}` },
+    })
     if (!res.ok) {
       const body = await res.text()
       throw new Error(`Sigil run failed: ${res.status} ${body}`)
