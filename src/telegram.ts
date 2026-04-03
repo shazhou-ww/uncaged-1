@@ -104,12 +104,23 @@ async function executePlan(
         tags: ['auto-created'],
       })
 
-      // Invoke immediately
-      const invokeResult = await sigil.run(
-        deployed.capability || design.capability_name,
-        plan.invoke_params || {},
-      )
-      return await llm.summarize(userText, design.capability_name, invokeResult)
+      // Invoke if we have params, otherwise just confirm creation
+      const capName = deployed.capability || design.capability_name
+      const params = plan.invoke_params || {}
+      const hasParams = Object.keys(params).length > 0 &&
+        Object.values(params).some(v => v !== undefined && v !== null && v !== '')
+
+      if (hasParams) {
+        const invokeResult = await sigil.run(capName, params)
+        return await llm.summarize(userText, capName, invokeResult)
+      } else {
+        // Describe what was created
+        const schema = design.capability_schema
+        const paramList = schema?.properties
+          ? Object.entries(schema.properties).map(([k, v]: [string, any]) => `\`${k}\` (${v.type}): ${v.description || ''}`)
+          : []
+        return `🔮 Capability \`${capName}\` created!\n\n${design.capability_description || ''}\n\nParameters:\n${paramList.map(p => `- ${p}`).join('\n')}\n\nTry it! For example: "hash the text hello world"`
+      }
     }
   }
 
