@@ -3,7 +3,7 @@ main = "src/index.ts"
 compatibility_date = "2026-04-03"
 
 [vars]
-SIGIL_URL = "https://sigil.shazhou.workers.dev"
+SIGIL_URL = "https://sigil.shazhou.work"
 
 # Secrets (set via wrangler secret put):
 # TELEGRAM_BOT_TOKEN
