@@ -1,0 +1,11 @@
+name = "uncaged"
+main = "src/index.ts"
+compatibility_date = "2026-04-03"
+
+[vars]
+SIGIL_URL = "https://sigil.shazhou.workers.dev"
+
+# Secrets (set via wrangler secret put):
+# TELEGRAM_BOT_TOKEN
+# DASHSCOPE_API_KEY
+# SIGIL_DEPLOY_TOKEN
