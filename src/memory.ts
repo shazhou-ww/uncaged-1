@@ -1,133 +1,192 @@
-// Memory — per-instance long-term knowledge stored in KV
-// Exposed as static tools for the LLM to read/write autonomously
+// Memory — per-instance long-term memory backed by Vectorize + Workers AI embeddings
+// Every message gets embedded and stored. Retrieval by semantic similarity or time range.
+
+const EMBEDDING_MODEL = '@cf/baai/bge-base-en-v1.5'
 
 export interface MemoryEntry {
   id: string
-  content: string
-  tags: string[]
-  created: number
-  updated: number
-}
-
-interface MemoryStore {
-  entries: MemoryEntry[]
-  version: number
+  text: string
+  role: 'user' | 'assistant'
+  timestamp: number
+  chatId: number
+  instanceId: string
+  score?: number
 }
 
 export class Memory {
   constructor(
-    private kv: KVNamespace,
+    private vectorIndex: VectorizeIndex,
+    private ai: any, // Workers AI binding
     private instanceId: string,
   ) {}
 
-  private key(): string {
-    return `mem:${this.instanceId}`
+  /**
+   * Store a message in long-term memory with its embedding.
+   */
+  async store(text: string, role: 'user' | 'assistant', chatId: number): Promise<string> {
+    const id = `${this.instanceId}:${Date.now()}:${crypto.randomUUID().slice(0, 8)}`
+    const timestamp = Date.now()
+
+    // Generate embedding
+    const embedding = await this.embed(text)
+
+    // Upsert into Vectorize
+    await this.vectorIndex.upsert([{
+      id,
+      values: embedding,
+      metadata: {
+        text: text.slice(0, 1000), // Vectorize metadata size limit
+        role,
+        timestamp,
+        chat_id: chatId,
+        instance_id: this.instanceId,
+      },
+    }])
+
+    return id
   }
 
-  private async load(): Promise<MemoryStore> {
-    const raw = await this.kv.get(this.key())
-    if (!raw) return { entries: [], version: 0 }
+  /**
+   * Semantic search: find memories most similar to the query.
+   * Returns top matches + surrounding context messages.
+   */
+  async search(query: string, topK = 5, contextWindow = 2): Promise<MemoryEntry[]> {
+    const queryEmbedding = await this.embed(query)
+
+    const results = await this.vectorIndex.query(queryEmbedding, {
+      topK,
+      returnMetadata: 'all',
+      filter: {
+        instance_id: this.instanceId,
+      },
+    })
+
+    if (!results.matches || results.matches.length === 0) {
+      return []
+    }
+
+    // Convert matches to MemoryEntry
+    const entries: MemoryEntry[] = results.matches.map(m => ({
+      id: m.id,
+      text: (m.metadata?.text as string) || '',
+      role: (m.metadata?.role as 'user' | 'assistant') || 'user',
+      timestamp: (m.metadata?.timestamp as number) || 0,
+      chatId: (m.metadata?.chat_id as number) || 0,
+      instanceId: (m.metadata?.instance_id as string) || this.instanceId,
+      score: m.score,
+    }))
+
+    if (contextWindow <= 0) return entries
+
+    // For each match, fetch surrounding messages by timestamp
+    const expanded = await this.expandContext(entries, contextWindow)
+    return expanded
+  }
+
+  /**
+   * Time-range recall: get messages from a specific time period.
+   * Useful for "what did we talk about yesterday?"
+   */
+  async recall(startTime: number, endTime: number, limit = 20): Promise<MemoryEntry[]> {
+    // Use a neutral embedding for time-range queries
+    // Filter by timestamp metadata
+    const neutralText = 'conversation context'
+    const embedding = await this.embed(neutralText)
+
+    const results = await this.vectorIndex.query(embedding, {
+      topK: limit,
+      returnMetadata: 'all',
+      filter: {
+        instance_id: this.instanceId,
+        timestamp: { $gte: startTime, $lte: endTime },
+      },
+    })
+
+    if (!results.matches) return []
+
+    const entries: MemoryEntry[] = results.matches
+      .map(m => ({
+        id: m.id,
+        text: (m.metadata?.text as string) || '',
+        role: (m.metadata?.role as 'user' | 'assistant') || 'user',
+        timestamp: (m.metadata?.timestamp as number) || 0,
+        chatId: (m.metadata?.chat_id as number) || 0,
+        instanceId: (m.metadata?.instance_id as string) || this.instanceId,
+        score: m.score,
+      }))
+      .sort((a, b) => a.timestamp - b.timestamp)
+
+    return entries
+  }
+
+  /**
+   * Get count of stored memories for this instance.
+   */
+  async count(): Promise<number> {
+    // Vectorize doesn't have a direct count API.
+    // Use a broad query with high topK as approximation.
     try {
-      return JSON.parse(raw)
+      const embedding = await this.embed('memory count')
+      const results = await this.vectorIndex.query(embedding, {
+        topK: 1,
+        returnMetadata: 'none',
+        filter: { instance_id: this.instanceId },
+      })
+      return results.count || 0
     } catch {
-      return { entries: [], version: 0 }
+      return 0
     }
-  }
-
-  private async save(store: MemoryStore): Promise<void> {
-    await this.kv.put(this.key(), JSON.stringify(store))
-  }
-
-  private generateId(): string {
-    return crypto.randomUUID().slice(0, 8)
   }
 
   /**
-   * Search memories by query string (simple substring + tag matching).
-   * Returns all if query is empty.
+   * Delete a specific memory entry.
    */
-  async search(query?: string, tags?: string[]): Promise<MemoryEntry[]> {
-    const store = await this.load()
-    let results = store.entries
-
-    if (query) {
-      const q = query.toLowerCase()
-      results = results.filter(e =>
-        e.content.toLowerCase().includes(q) ||
-        e.tags.some(t => t.toLowerCase().includes(q))
-      )
+  async forget(id: string): Promise<boolean> {
+    try {
+      await this.vectorIndex.deleteByIds([id])
+      return true
+    } catch {
+      return false
     }
+  }
 
-    if (tags && tags.length > 0) {
-      const tagSet = new Set(tags.map(t => t.toLowerCase()))
-      results = results.filter(e =>
-        e.tags.some(t => tagSet.has(t.toLowerCase()))
-      )
-    }
+  // ─── Private helpers ───
 
-    return results
+  private async embed(text: string): Promise<number[]> {
+    const result = await this.ai.run(EMBEDDING_MODEL, { text: [text] })
+    return result.data[0]
   }
 
   /**
-   * Save a new memory entry or update an existing one by id.
+   * Given seed entries, fetch surrounding messages (by timestamp proximity)
+   * to provide conversation context.
    */
-  async save_entry(content: string, tags: string[] = [], id?: string): Promise<MemoryEntry> {
-    const store = await this.load()
-    const now = Date.now()
+  private async expandContext(seeds: MemoryEntry[], windowSize: number): Promise<MemoryEntry[]> {
+    if (seeds.length === 0) return []
 
-    if (id) {
-      // Update existing
-      const existing = store.entries.find(e => e.id === id)
-      if (existing) {
-        existing.content = content
-        existing.tags = tags
-        existing.updated = now
-        store.version++
-        await this.save(store)
-        return existing
+    // For each seed, query nearby timestamps
+    const allEntries = new Map<string, MemoryEntry>()
+    for (const seed of seeds) {
+      allEntries.set(seed.id, seed)
+    }
+
+    // Expand: find messages within a time window around each match
+    for (const seed of seeds.slice(0, 3)) { // limit expansion to top 3
+      const timeWindowMs = 5 * 60 * 1000 // 5 minute window
+      const startTime = seed.timestamp - timeWindowMs
+      const endTime = seed.timestamp + timeWindowMs
+
+      try {
+        const nearby = await this.recall(startTime, endTime, windowSize * 2 + 1)
+        for (const entry of nearby) {
+          allEntries.set(entry.id, entry)
+        }
+      } catch {
+        // Vectorize filter might not support range on all plans, degrade gracefully
       }
     }
 
-    // Create new
-    const entry: MemoryEntry = {
-      id: id || this.generateId(),
-      content,
-      tags,
-      created: now,
-      updated: now,
-    }
-    store.entries.push(entry)
-    store.version++
-    await this.save(store)
-    return entry
-  }
-
-  /**
-   * Forget a memory entry by id.
-   */
-  async forget(id: string): Promise<boolean> {
-    const store = await this.load()
-    const idx = store.entries.findIndex(e => e.id === id)
-    if (idx === -1) return false
-    store.entries.splice(idx, 1)
-    store.version++
-    await this.save(store)
-    return true
-  }
-
-  /**
-   * Get all memories (for injecting into system prompt summary).
-   */
-  async all(): Promise<MemoryEntry[]> {
-    const store = await this.load()
-    return store.entries
-  }
-
-  /**
-   * Count of memories stored.
-   */
-  async count(): Promise<number> {
-    const store = await this.load()
-    return store.entries.length
+    // Sort by timestamp
+    return Array.from(allEntries.values()).sort((a, b) => a.timestamp - b.timestamp)
   }
 }

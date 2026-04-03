@@ -37,33 +37,20 @@ export async function handleTelegramWebhook(
     await chatStore.clear(chatId)
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
       '🔓 Hi! I\'m Uncaged — a Sigil-native AI agent.\n\n' +
-      'I can discover capabilities, create new ones, and remember things across conversations.\n\n' +
+      'I can discover capabilities, create new ones, and I remember everything across conversations.\n\n' +
       'Just tell me what you need!\n\n' +
-      'Commands:\n/start — reset conversation\n/clear — clear chat history\n/memory — show my memories\n/soul — show my personality')
+      'Commands:\n/start — reset conversation\n/clear — clear chat history\n/soul — show my personality')
     return new Response('ok')
   }
 
   // /clear command
   if (userText === '/clear') {
     await chatStore.clear(chatId)
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '🧹 Conversation cleared! (Memory retained)')
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '🧹 Conversation cleared! (Long-term memory retained)')
     return new Response('ok')
   }
 
-  // /memory command — show memory stats
-  if (userText === '/memory') {
-    const entries = await memory.all()
-    if (entries.length === 0) {
-      await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '🧠 No memories yet. I\'ll start remembering as we chat!')
-    } else {
-      const lines = entries.map(e => `• [${e.tags.join(', ')}] ${e.content}`).slice(0, 20)
-      await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
-        `🧠 ${entries.length} memories:\n\n${lines.join('\n')}`)
-    }
-    return new Response('ok')
-  }
-
-  // /soul command — show current soul
+  // /soul command
   if (userText === '/soul') {
     const soulText = await soul.get()
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, `👻 My soul:\n\n${soulText}`)
@@ -71,24 +58,33 @@ export async function handleTelegramWebhook(
   }
 
   try {
-    // Load existing history
+    // 1. Store user message embedding (async, don't block)
+    const storeUserPromise = memory.store(userText, 'user', chatId)
+
+    // 2. Load chat history
     let messages = await chatStore.load(chatId)
 
-    // Compress if needed
+    // 3. Compress if needed
     const { messages: compressed } = chatStore.maybeCompress(messages)
     messages = compressed
 
-    // Add user message
+    // 4. Add user message
     messages.push({ role: 'user', content: userText })
 
-    // Run agentic loop with soul + memory
+    // 5. Run agentic loop
     const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory)
 
-    // Save updated history
+    // 6. Store assistant reply embedding (async)
+    const storeAssistantPromise = memory.store(reply, 'assistant', chatId)
+
+    // 7. Save chat history
     await chatStore.save(chatId, updatedMessages)
 
-    // Reply
+    // 8. Reply to user
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, reply)
+
+    // 9. Await embedding storage (best effort)
+    await Promise.allSettled([storeUserPromise, storeAssistantPromise])
   } catch (e: any) {
     console.error('[uncaged] error:', e)
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,

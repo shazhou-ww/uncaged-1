@@ -69,29 +69,30 @@ const MEMORY_TOOLS: ToolDef[] = [
     type: 'function',
     function: {
       name: 'memory_search',
-      description: 'Search your long-term memory for stored knowledge. Use this to recall facts, preferences, and notes about the user or past interactions. Returns matching entries. If query is empty, returns all memories.',
+      description: 'Semantically search your long-term memory. Every conversation message is automatically stored — this searches across all past conversations by meaning. Returns the most relevant messages with surrounding context. Use at the start of conversations to recall what you know about the user.',
       parameters: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: 'Search term (matches content and tags)' },
-          tags: { type: 'array', items: { type: 'string' }, description: 'Filter by tags' },
+          query: { type: 'string', description: 'What to search for (semantic similarity)' },
+          top_k: { type: 'number', description: 'Max results (default 5)' },
         },
+        required: ['query'],
       },
     },
   },
   {
     type: 'function',
     function: {
-      name: 'memory_save',
-      description: 'Save something to long-term memory. Use this to remember important facts, user preferences, decisions, or anything worth keeping across conversations. Include relevant tags for easy retrieval later.',
+      name: 'memory_recall',
+      description: 'Recall messages from a specific time period. Use for questions like "what did we talk about yesterday?" or "what happened last week?". Returns messages sorted by time.',
       parameters: {
         type: 'object',
         properties: {
-          content: { type: 'string', description: 'What to remember' },
-          tags: { type: 'array', items: { type: 'string' }, description: 'Tags for categorization (e.g. ["preference", "user"], ["fact", "technical"])' },
-          id: { type: 'string', description: 'ID of existing entry to update (omit to create new)' },
+          start_time: { type: 'string', description: 'Start of time range (ISO 8601, e.g. "2026-04-03T00:00:00Z")' },
+          end_time: { type: 'string', description: 'End of time range (ISO 8601, e.g. "2026-04-03T23:59:59Z")' },
+          limit: { type: 'number', description: 'Max messages (default 20)' },
         },
-        required: ['content'],
+        required: ['start_time'],
       },
     },
   },
@@ -99,7 +100,7 @@ const MEMORY_TOOLS: ToolDef[] = [
     type: 'function',
     function: {
       name: 'memory_forget',
-      description: 'Remove a specific memory entry by ID. Use when information is outdated or incorrect.',
+      description: 'Remove a specific memory entry by ID. Use when asked to forget something.',
       parameters: {
         type: 'object',
         properties: {
@@ -194,7 +195,7 @@ function capabilityToTool(cap: CapabilityInfo): ToolDef {
 
 // ─── System prompt builder ───
 
-function buildSystemPrompt(soul: string, memoryCount: number): string {
+function buildSystemPrompt(soul: string): string {
   return `${soul}
 
 ## How tools work
@@ -206,12 +207,12 @@ function buildSystemPrompt(soul: string, memoryCount: number): string {
 - If a capability tool disappears from your tool list, just sigil_query for it again.
 
 ### Memory
-- You have long-term memory that persists across conversations.
-- Use memory_search to recall stored knowledge (${memoryCount} entries stored).
-- Use memory_save to remember important facts, user preferences, and decisions.
-- Use memory_forget to remove outdated information.
-- Proactively save things worth remembering — don't wait to be asked.
-- When a conversation starts, consider searching memory for relevant context.
+- Every conversation message is automatically stored in your long-term memory with semantic embeddings.
+- Use memory_search to semantically recall past conversations (finds relevant messages by meaning).
+- Use memory_recall to retrieve messages from a specific time period.
+- Use memory_forget to delete specific entries.
+- At the start of a new conversation, proactively search memory for what you know about the user.
+- You don't need to manually save memories — all messages are stored automatically.
 
 ### Workflow
 1. For general chat/knowledge, answer directly.
@@ -243,10 +244,9 @@ export class LlmClient {
     memory: Memory,
   ): Promise<{ reply: string; updatedMessages: ChatMessage[] }> {
 
-    // Build system prompt from Soul + Memory context
+    // Build system prompt from Soul
     const soulText = await soul.get()
-    const memCount = await memory.count()
-    const systemPrompt = buildSystemPrompt(soulText, memCount)
+    const systemPrompt = buildSystemPrompt(soulText)
 
     // Ensure system prompt is first
     if (messages.length === 0 || messages[0].role !== 'system') {
@@ -352,13 +352,15 @@ export class LlmClient {
 
     // ── Memory tools ──
     if (name === 'memory_search') {
-      const results = await memory.search(args.query, args.tags)
+      const results = await memory.search(args.query, args.top_k || 5)
       return JSON.stringify({ entries: results, total: results.length })
     }
 
-    if (name === 'memory_save') {
-      const entry = await memory.save_entry(args.content, args.tags || [], args.id)
-      return JSON.stringify({ saved: true, entry })
+    if (name === 'memory_recall') {
+      const startTime = new Date(args.start_time).getTime()
+      const endTime = args.end_time ? new Date(args.end_time).getTime() : Date.now()
+      const results = await memory.recall(startTime, endTime, args.limit || 20)
+      return JSON.stringify({ entries: results, total: results.length })
     }
 
     if (name === 'memory_forget') {

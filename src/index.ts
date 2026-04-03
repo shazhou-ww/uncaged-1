@@ -12,6 +12,8 @@ export interface Env {
   SIGIL_URL: string
   INSTANCE_ID: string
   CHAT_KV: KVNamespace
+  MEMORY_INDEX: VectorizeIndex
+  AI: any
 }
 
 export default {
@@ -23,10 +25,10 @@ export default {
     if (url.pathname === '/' && request.method === 'GET') {
       return new Response(JSON.stringify({
         name: 'uncaged',
-        version: '0.3.0',
+        version: '0.4.0',
         status: 'ok',
         instance: instanceId,
-        description: 'Sigil-native AI Agent — soul + memory + dynamic tools',
+        description: 'Sigil-native AI Agent — soul + vector memory + dynamic tools',
       }), { headers: { 'Content-Type': 'application/json' } })
     }
 
@@ -36,7 +38,7 @@ export default {
       const llm = new LlmClient(env.DASHSCOPE_API_KEY)
       const chatStore = new ChatStore(env.CHAT_KV)
       const soul = new Soul(env.CHAT_KV, instanceId)
-      const memory = new Memory(env.CHAT_KV, instanceId)
+      const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
       return handleTelegramWebhook(request, env, sigil, llm, chatStore, soul, memory)
     }
 
@@ -64,9 +66,16 @@ export default {
 
     // Memory stats API
     if (url.pathname === '/memory' && request.method === 'GET') {
-      const memory = new Memory(env.CHAT_KV, instanceId)
-      const entries = await memory.all()
-      return new Response(JSON.stringify({ instance: instanceId, count: entries.length, entries }), {
+      const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
+      const q = url.searchParams.get('q')
+      if (q) {
+        const entries = await memory.search(q, 10, 0)
+        return new Response(JSON.stringify({ instance: instanceId, query: q, entries }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      const count = await memory.count()
+      return new Response(JSON.stringify({ instance: instanceId, count }), {
         headers: { 'Content-Type': 'application/json' },
       })
     }

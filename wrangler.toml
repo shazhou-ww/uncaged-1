@@ -6,8 +6,16 @@ compatibility_date = "2026-04-03"
 binding = "CHAT_KV"
 id = "84a3ac3b64c846bd9e6c2b8632dc2499"
 
+[[vectorize]]
+binding = "MEMORY_INDEX"
+index_name = "uncaged-memory"
+
+[ai]
+binding = "AI"
+
 [vars]
 SIGIL_URL = "https://sigil.shazhou.work"
+INSTANCE_ID = "doudou"
 
 # Secrets (set via wrangler secret put):
 # TELEGRAM_BOT_TOKEN
