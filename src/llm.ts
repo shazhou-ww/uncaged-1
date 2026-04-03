@@ -215,11 +215,12 @@ function buildSystemPrompt(soul: string): string {
 - You don't need to manually save memories — all messages are stored automatically.
 
 ### Workflow
-1. For general chat/knowledge, answer directly.
-2. When computation or a service is needed:
-   a. Use sigil_query to search for existing capabilities.
-   b. If found, call the capability tool directly (e.g., cap_sha256_hash).
+1. For casual chat or pure knowledge questions (no external data needed), answer directly.
+2. For ANYTHING that requires external data, computation, or API access:
+   a. ALWAYS use sigil_query first to search for existing capabilities.
+   b. If found, call the capability tool directly (e.g., cap_xiaoju_github_repos).
    c. If not found, use sigil_deploy to create it, then call it.
+   d. NEVER try to answer with fabricated data or suggest the user do it manually.
 3. If a tool call fails, read the error and adjust your approach.
 4. Proactively remember things — user preferences, important facts, decisions made.
 
