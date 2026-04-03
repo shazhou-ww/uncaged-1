@@ -2,6 +2,10 @@ name = "uncaged"
 main = "src/index.ts"
 compatibility_date = "2026-04-03"
 
+[[kv_namespaces]]
+binding = "CHAT_KV"
+id = "84a3ac3b64c846bd9e6c2b8632dc2499"
+
 [vars]
 SIGIL_URL = "https://sigil.shazhou.work"
 

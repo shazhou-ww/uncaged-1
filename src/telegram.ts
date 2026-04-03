@@ -2,6 +2,8 @@
 
 import { SigilClient } from './sigil.js'
 import { LlmClient } from './llm.js'
+import { ChatStore } from './chat-store.js'
+import type { ChatMessage } from './chat-store.js'
 import type { Env } from './index.js'
 
 interface TelegramUpdate {
@@ -18,6 +20,7 @@ export async function handleTelegramWebhook(
   env: Env,
   sigil: SigilClient,
   llm: LlmClient,
+  chatStore: ChatStore,
 ): Promise<Response> {
   const update: TelegramUpdate = await request.json()
   const msg = update.message
@@ -26,19 +29,43 @@ export async function handleTelegramWebhook(
   const chatId = msg.chat.id
   const userText = msg.text
 
-  // /start command
+  // /start command — reset conversation
   if (userText === '/start') {
+    await chatStore.clear(chatId)
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
       '🔓 Hi! I\'m Uncaged — a Sigil-native AI agent.\n\n' +
-      'I can search for existing capabilities, create new ones on the fly, and use them to help you.\n\n' +
-      'Just tell me what you need!')
+      'I can discover existing capabilities, create new ones on the fly, and use them to help you.\n\n' +
+      'Just tell me what you need!\n\n' +
+      'Commands:\n/start — reset conversation\n/clear — clear history')
+    return new Response('ok')
+  }
+
+  // /clear command
+  if (userText === '/clear') {
+    await chatStore.clear(chatId)
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '🧹 Conversation cleared!')
     return new Response('ok')
   }
 
   try {
-    // Run the agentic loop — LLM drives tool calls autonomously
-    const result = await llm.agentLoop(userText, sigil)
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, result)
+    // Load existing history
+    let messages = await chatStore.load(chatId)
+
+    // Compress if needed (this is where old tools get "unloaded")
+    const { messages: compressed, compressed: didCompress } = chatStore.maybeCompress(messages)
+    messages = compressed
+
+    // Add user message
+    messages.push({ role: 'user', content: userText })
+
+    // Run agentic loop — tools are derived from history each round
+    const { reply, updatedMessages } = await llm.agentLoop(messages, sigil)
+
+    // Save updated history
+    await chatStore.save(chatId, updatedMessages)
+
+    // Reply
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, reply)
   } catch (e: any) {
     console.error('[uncaged] error:', e)
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
