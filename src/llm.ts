@@ -1,6 +1,9 @@
 // LLM client — DashScope (OpenAI-compatible) with dynamic tool loading
+// Soul (personality) + Memory (long-term knowledge) + Sigil (capabilities)
 
 import { SigilClient } from './sigil.js'
+import { Soul } from './soul.js'
+import { Memory } from './memory.js'
 import type { ChatMessage, ToolCall } from './chat-store.js'
 
 const DASHSCOPE_BASE = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
@@ -17,7 +20,7 @@ interface ToolDef {
 
 // ─── Static tools: always available ───
 
-const STATIC_TOOLS: ToolDef[] = [
+const SIGIL_TOOLS: ToolDef[] = [
   {
     type: 'function',
     function: {
@@ -61,6 +64,55 @@ const STATIC_TOOLS: ToolDef[] = [
   },
 ]
 
+const MEMORY_TOOLS: ToolDef[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'memory_search',
+      description: 'Search your long-term memory for stored knowledge. Use this to recall facts, preferences, and notes about the user or past interactions. Returns matching entries. If query is empty, returns all memories.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Search term (matches content and tags)' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Filter by tags' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_save',
+      description: 'Save something to long-term memory. Use this to remember important facts, user preferences, decisions, or anything worth keeping across conversations. Include relevant tags for easy retrieval later.',
+      parameters: {
+        type: 'object',
+        properties: {
+          content: { type: 'string', description: 'What to remember' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Tags for categorization (e.g. ["preference", "user"], ["fact", "technical"])' },
+          id: { type: 'string', description: 'ID of existing entry to update (omit to create new)' },
+        },
+        required: ['content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'memory_forget',
+      description: 'Remove a specific memory entry by ID. Use when information is outdated or incorrect.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'Memory entry ID to remove' },
+        },
+        required: ['id'],
+      },
+    },
+  },
+]
+
+const STATIC_TOOLS: ToolDef[] = [...SIGIL_TOOLS, ...MEMORY_TOOLS]
+
 // ─── Dynamic tools: derived from chat history ───
 
 interface CapabilityInfo {
@@ -76,17 +128,16 @@ interface CapabilityInfo {
 /**
  * Scan chat history for sigil_query results and sigil_deploy calls.
  * Extract capability info to generate dynamic tool definitions.
- * 
- * This is the key insight: tools = f(chat_history).
- * When context compression drops old sigil_query results,
- * the corresponding tools automatically disappear (unloaded).
- * When LLM queries again, they reappear (loaded).
+ *
+ * tools = f(chat_history):
+ * - sigil_query results → cap_* tools appear
+ * - context compression drops results → cap_* tools disappear
+ * - re-query → tools reappear (page fault)
  */
 function extractCapabilitiesFromHistory(messages: ChatMessage[]): CapabilityInfo[] {
   const caps = new Map<string, CapabilityInfo>()
 
   for (const msg of messages) {
-    // Extract from sigil_query results (tool response)
     if (msg.role === 'tool' && msg.content) {
       try {
         const data = JSON.parse(msg.content)
@@ -104,7 +155,6 @@ function extractCapabilitiesFromHistory(messages: ChatMessage[]): CapabilityInfo
       } catch { /* not a query result */ }
     }
 
-    // Extract from sigil_deploy calls (assistant tool_call)
     if (msg.role === 'assistant' && msg.tool_calls) {
       for (const tc of msg.tool_calls) {
         if (tc.function.name === 'sigil_deploy') {
@@ -126,10 +176,6 @@ function extractCapabilitiesFromHistory(messages: ChatMessage[]): CapabilityInfo
   return Array.from(caps.values())
 }
 
-/**
- * Convert a Sigil capability into an LLM tool definition.
- * The LLM calls it directly by name — we intercept and route to Sigil.
- */
 function capabilityToTool(cap: CapabilityInfo): ToolDef {
   const params = cap.schema || { type: 'object', properties: {} }
   return {
@@ -146,26 +192,38 @@ function capabilityToTool(cap: CapabilityInfo): ToolDef {
   }
 }
 
-// ─── System prompt ───
+// ─── System prompt builder ───
 
-const SYSTEM_PROMPT = `You are Uncaged 🔓, a Sigil-native AI agent with the ability to discover, create, and use serverless capabilities.
+function buildSystemPrompt(soul: string, memoryCount: number): string {
+  return `${soul}
 
-How tools work:
+## How tools work
+
+### Capabilities (Sigil)
 - You always have sigil_query and sigil_deploy available.
 - When you use sigil_query, matching capabilities automatically appear as callable tools (prefixed with cap_).
 - When you use sigil_deploy to create a new capability, it also appears as a callable tool.
 - If a capability tool disappears from your tool list, just sigil_query for it again.
 
-Workflow:
+### Memory
+- You have long-term memory that persists across conversations.
+- Use memory_search to recall stored knowledge (${memoryCount} entries stored).
+- Use memory_save to remember important facts, user preferences, and decisions.
+- Use memory_forget to remove outdated information.
+- Proactively save things worth remembering — don't wait to be asked.
+- When a conversation starts, consider searching memory for relevant context.
+
+### Workflow
 1. For general chat/knowledge, answer directly.
 2. When computation or a service is needed:
    a. Use sigil_query to search for existing capabilities.
    b. If found, call the capability tool directly (e.g., cap_sha256_hash).
    c. If not found, use sigil_deploy to create it, then call it.
 3. If a tool call fails, read the error and adjust your approach.
-4. If the user asks to "create a capability" without input data, create it and explain how to use it.
+4. Proactively remember things — user preferences, important facts, decisions made.
 
 Be concise and helpful.`
+}
 
 // ─── Agent loop ───
 
@@ -176,21 +234,29 @@ export class LlmClient {
 
   /**
    * Run agentic loop with dynamic tools derived from chat history.
+   * Soul defines personality, Memory provides long-term knowledge.
    */
   async agentLoop(
     messages: ChatMessage[],
     sigil: SigilClient,
+    soul: Soul,
+    memory: Memory,
   ): Promise<{ reply: string; updatedMessages: ChatMessage[] }> {
+
+    // Build system prompt from Soul + Memory context
+    const soulText = await soul.get()
+    const memCount = await memory.count()
+    const systemPrompt = buildSystemPrompt(soulText, memCount)
 
     // Ensure system prompt is first
     if (messages.length === 0 || messages[0].role !== 'system') {
-      messages = [{ role: 'system', content: SYSTEM_PROMPT }, ...messages]
+      messages = [{ role: 'system', content: systemPrompt }, ...messages]
     } else {
-      messages[0].content = SYSTEM_PROMPT
+      messages[0].content = systemPrompt
     }
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      // ── Key: derive tools from current chat history ──
+      // Derive dynamic tools from chat history
       const dynamicCaps = extractCapabilitiesFromHistory(messages)
       const dynamicTools = dynamicCaps.map(capabilityToTool)
       const allTools = [...STATIC_TOOLS, ...dynamicTools]
@@ -215,7 +281,7 @@ export class LlmClient {
       for (const tc of response.tool_calls) {
         let result: string
         try {
-          result = await this.executeTool(tc, sigil)
+          result = await this.executeTool(tc, sigil, memory)
         } catch (e: any) {
           result = JSON.stringify({ error: e.message || 'Unknown error' })
         }
@@ -263,11 +329,11 @@ export class LlmClient {
     }
   }
 
-  private async executeTool(tc: ToolCall, sigil: SigilClient): Promise<string> {
+  private async executeTool(tc: ToolCall, sigil: SigilClient, memory: Memory): Promise<string> {
     const name = tc.function.name
     const args = JSON.parse(tc.function.arguments)
 
-    // Static tools
+    // ── Sigil tools ──
     if (name === 'sigil_query') {
       const result = await sigil.query(args.q, args.limit || 5)
       return JSON.stringify(result)
@@ -284,7 +350,23 @@ export class LlmClient {
       return JSON.stringify(result)
     }
 
-    // Dynamic capability tools: cap_{name} → sigil.run({name})
+    // ── Memory tools ──
+    if (name === 'memory_search') {
+      const results = await memory.search(args.query, args.tags)
+      return JSON.stringify({ entries: results, total: results.length })
+    }
+
+    if (name === 'memory_save') {
+      const entry = await memory.save_entry(args.content, args.tags || [], args.id)
+      return JSON.stringify({ saved: true, entry })
+    }
+
+    if (name === 'memory_forget') {
+      const ok = await memory.forget(args.id)
+      return JSON.stringify({ forgotten: ok, id: args.id })
+    }
+
+    // ── Dynamic capability tools ──
     if (name.startsWith('cap_')) {
       const capName = name.slice(4).replace(/_/g, '-')
       const result = await sigil.run(capName, args)

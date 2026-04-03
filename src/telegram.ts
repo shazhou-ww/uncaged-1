@@ -3,7 +3,8 @@
 import { SigilClient } from './sigil.js'
 import { LlmClient } from './llm.js'
 import { ChatStore } from './chat-store.js'
-import type { ChatMessage } from './chat-store.js'
+import { Soul } from './soul.js'
+import { Memory } from './memory.js'
 import type { Env } from './index.js'
 
 interface TelegramUpdate {
@@ -21,6 +22,8 @@ export async function handleTelegramWebhook(
   sigil: SigilClient,
   llm: LlmClient,
   chatStore: ChatStore,
+  soul: Soul,
+  memory: Memory,
 ): Promise<Response> {
   const update: TelegramUpdate = await request.json()
   const msg = update.message
@@ -34,16 +37,36 @@ export async function handleTelegramWebhook(
     await chatStore.clear(chatId)
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
       '🔓 Hi! I\'m Uncaged — a Sigil-native AI agent.\n\n' +
-      'I can discover existing capabilities, create new ones on the fly, and use them to help you.\n\n' +
+      'I can discover capabilities, create new ones, and remember things across conversations.\n\n' +
       'Just tell me what you need!\n\n' +
-      'Commands:\n/start — reset conversation\n/clear — clear history')
+      'Commands:\n/start — reset conversation\n/clear — clear chat history\n/memory — show my memories\n/soul — show my personality')
     return new Response('ok')
   }
 
   // /clear command
   if (userText === '/clear') {
     await chatStore.clear(chatId)
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '🧹 Conversation cleared!')
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '🧹 Conversation cleared! (Memory retained)')
+    return new Response('ok')
+  }
+
+  // /memory command — show memory stats
+  if (userText === '/memory') {
+    const entries = await memory.all()
+    if (entries.length === 0) {
+      await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '🧠 No memories yet. I\'ll start remembering as we chat!')
+    } else {
+      const lines = entries.map(e => `• [${e.tags.join(', ')}] ${e.content}`).slice(0, 20)
+      await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
+        `🧠 ${entries.length} memories:\n\n${lines.join('\n')}`)
+    }
+    return new Response('ok')
+  }
+
+  // /soul command — show current soul
+  if (userText === '/soul') {
+    const soulText = await soul.get()
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, `👻 My soul:\n\n${soulText}`)
     return new Response('ok')
   }
 
@@ -51,15 +74,15 @@ export async function handleTelegramWebhook(
     // Load existing history
     let messages = await chatStore.load(chatId)
 
-    // Compress if needed (this is where old tools get "unloaded")
-    const { messages: compressed, compressed: didCompress } = chatStore.maybeCompress(messages)
+    // Compress if needed
+    const { messages: compressed } = chatStore.maybeCompress(messages)
     messages = compressed
 
     // Add user message
     messages.push({ role: 'user', content: userText })
 
-    // Run agentic loop — tools are derived from history each round
-    const { reply, updatedMessages } = await llm.agentLoop(messages, sigil)
+    // Run agentic loop with soul + memory
+    const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory)
 
     // Save updated history
     await chatStore.save(chatId, updatedMessages)
@@ -85,7 +108,6 @@ async function sendTelegram(token: string, chatId: number, text: string): Promis
       parse_mode: 'Markdown',
     }),
   })
-  // If Markdown parse fails, retry without parse_mode
   if (!res.ok) {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',

@@ -2,26 +2,31 @@ import { handleTelegramWebhook } from './telegram.js'
 import { SigilClient } from './sigil.js'
 import { LlmClient } from './llm.js'
 import { ChatStore } from './chat-store.js'
+import { Soul } from './soul.js'
+import { Memory } from './memory.js'
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string
   DASHSCOPE_API_KEY: string
   SIGIL_DEPLOY_TOKEN: string
   SIGIL_URL: string
+  INSTANCE_ID: string
   CHAT_KV: KVNamespace
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
+    const instanceId = env.INSTANCE_ID || 'default'
 
     // Health check
     if (url.pathname === '/' && request.method === 'GET') {
       return new Response(JSON.stringify({
         name: 'uncaged',
-        version: '0.2.0',
+        version: '0.3.0',
         status: 'ok',
-        description: 'Sigil-native AI Agent — dynamic tool loading',
+        instance: instanceId,
+        description: 'Sigil-native AI Agent — soul + memory + dynamic tools',
       }), { headers: { 'Content-Type': 'application/json' } })
     }
 
@@ -30,7 +35,40 @@ export default {
       const sigil = new SigilClient(env.SIGIL_URL, env.SIGIL_DEPLOY_TOKEN)
       const llm = new LlmClient(env.DASHSCOPE_API_KEY)
       const chatStore = new ChatStore(env.CHAT_KV)
-      return handleTelegramWebhook(request, env, sigil, llm, chatStore)
+      const soul = new Soul(env.CHAT_KV, instanceId)
+      const memory = new Memory(env.CHAT_KV, instanceId)
+      return handleTelegramWebhook(request, env, sigil, llm, chatStore, soul, memory)
+    }
+
+    // Soul management API
+    if (url.pathname === '/soul' && request.method === 'GET') {
+      const soul = new Soul(env.CHAT_KV, instanceId)
+      const text = await soul.get()
+      return new Response(JSON.stringify({ instance: instanceId, soul: text }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    if (url.pathname === '/soul' && request.method === 'PUT') {
+      const auth = request.headers.get('Authorization')
+      if (auth !== `Bearer ${env.SIGIL_DEPLOY_TOKEN}`) {
+        return new Response('Unauthorized', { status: 401 })
+      }
+      const body: any = await request.json()
+      const soul = new Soul(env.CHAT_KV, instanceId)
+      await soul.set(body.soul)
+      return new Response(JSON.stringify({ ok: true, instance: instanceId }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    // Memory stats API
+    if (url.pathname === '/memory' && request.method === 'GET') {
+      const memory = new Memory(env.CHAT_KV, instanceId)
+      const entries = await memory.all()
+      return new Response(JSON.stringify({ instance: instanceId, count: entries.length, entries }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
     }
 
     return new Response('Not found', { status: 404 })
