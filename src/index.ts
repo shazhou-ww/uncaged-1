@@ -16,6 +16,7 @@ export interface Env {
   ALLOWED_CHAT_IDS: string
   CHAT_KV: KVNamespace
   MEMORY_INDEX: VectorizeIndex
+  MEMORY_DB?: D1Database // Optional: structured memory storage (Issue #8)
   AI: any
   DEBUG_ENABLED?: string
 }
@@ -46,7 +47,7 @@ export default {
       )
       const chatStore = new ChatStore(env.CHAT_KV)
       const soul = new Soul(env.CHAT_KV, instanceId)
-      const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
+      const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId, env.MEMORY_DB)
       return handleTelegramWebhook(request, env, sigil, llm, chatStore, soul, memory, ctx)
     }
 
@@ -117,7 +118,7 @@ export default {
       )
       const chatStore = new ChatStore(env.CHAT_KV)
       const soul = new Soul(env.CHAT_KV, instanceId)
-      const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
+      const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId, env.MEMORY_DB)
 
       const userMessage = body.message.trim()
 
@@ -187,7 +188,7 @@ export default {
 
     // Memory stats API
     if (url.pathname === '/memory' && request.method === 'GET') {
-      const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
+      const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId, env.MEMORY_DB)
       const q = url.searchParams.get('q')
       if (q) {
         const entries = await memory.search(q, 10, 0)
@@ -213,7 +214,7 @@ export default {
         return new Response('Unauthorized', { status: 401 })
       }
       try {
-        const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
+        const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId, env.MEMORY_DB)
         
         // 1. Generate embedding
         const testText = 'debug vectorize test ' + Date.now()
