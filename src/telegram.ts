@@ -5,7 +5,7 @@ import { LlmClient } from './llm.js'
 import { ChatStore, type ContentPart } from './chat-store.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
-import { uploadImageToDashScope } from './utils.js'
+import { storeImageForVL } from './utils.js'
 import type { Env } from './index.js'
 
 interface TelegramUpdate {
@@ -149,7 +149,7 @@ export async function handleTelegramWebhook(
             const filename = `tg-${fileId.slice(0,8)}.${ext}`
             
             // 3. Upload to DashScope Files API (with base64 fallback)
-            imageUrl = await uploadImageToDashScope(arrayBuffer, filename, mimeType, env.DASHSCOPE_API_KEY)
+            imageUrl = await storeImageForVL(arrayBuffer, mimeType, env.CHAT_KV, 'https://doudou.shazhou.work')
           }
         }
       }

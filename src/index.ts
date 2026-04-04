@@ -4,7 +4,7 @@ import { LlmClient } from './llm.js'
 import { ChatStore, type ContentPart } from './chat-store.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
-import { uploadImageToDashScope } from './utils.js'
+import { storeImageForVL } from './utils.js'
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string
@@ -188,7 +188,7 @@ export default {
                 const filename = urlPath.split('/').pop() || `image.${contentType.split('/')[1] || 'jpg'}`
                 
                 // Upload to DashScope (with base64 fallback)
-                finalImageUrl = await uploadImageToDashScope(arrayBuffer, filename, contentType, env.DASHSCOPE_API_KEY)
+                finalImageUrl = await storeImageForVL(arrayBuffer, contentType, env.CHAT_KV, 'https://doudou.shazhou.work')
                 console.log(`[Multimodal] /chat API: Processed external image URL`)
               }
             } catch (e) {
@@ -237,6 +237,21 @@ export default {
       const count = await memory.count()
       return new Response(JSON.stringify({ instance: instanceId, count }), {
         headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    // Serve uploaded images from KV (for DashScope VL access)
+    if (url.pathname.startsWith('/image/') && request.method === 'GET') {
+      const imageId = url.pathname.slice(7) // strip '/image/'
+      const imageData = await env.CHAT_KV.get(`img:${imageId}`, 'arrayBuffer')
+      if (!imageData) {
+        return new Response('Not found', { status: 404 })
+      }
+      // Detect content type from stored metadata or default to jpeg
+      const meta = await env.CHAT_KV.get(`img:${imageId}:meta`, 'text')
+      const contentType = meta || 'image/jpeg'
+      return new Response(imageData, {
+        headers: { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=3600' },
       })
     }
 
