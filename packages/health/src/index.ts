@@ -3,6 +3,8 @@
  * Runs every 5 minutes to check Uncaged AI Agent health
  */
 
+import { renderDashboard } from './dashboard.js';
+
 interface Env {
   HEALTH_KV: KVNamespace;
   UNCAGED_URL: string;
@@ -251,6 +253,13 @@ async function handleHistoryRequest(request: Request, env: Env): Promise<Respons
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // Dashboard
+    if (url.pathname === '/' || url.pathname === '') {
+      return new Response(renderDashboard(), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    }
 
     if (url.pathname === '/health') {
       return handleHealthRequest(env);
