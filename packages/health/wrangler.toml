@@ -17,4 +17,4 @@ OC_STATUS_URL = "https://oc-status.shazhou.workers.dev"
 binding = "HEALTH_KV"
 # ⚠️ Replace with actual KV namespace ID before deploying:
 # Run: wrangler kv namespace create HEALTH_KV
-id = "placeholder-replace-before-deploy"
+id = "3970f9e4bd1047d998bd84e440e7e3ab"
