@@ -15,14 +15,23 @@ export interface MemoryEntry {
 
 // bge-m3: 1024 dims, multilingual (was bge-base-en-v1.5: 768 dims, english-only)
 export class Memory {
+  private hasD1: boolean
+
   constructor(
     private vectorIndex: VectorizeIndex,
     private ai: any, // Workers AI binding
     private instanceId: string,
-  ) {}
+    private db?: D1Database, // Optional D1 binding for structured storage
+  ) {
+    this.hasD1 = !!db
+    if (!this.hasD1) {
+      console.warn('[Memory] D1 binding not found, falling back to Vectorize-only mode')
+    }
+  }
 
   /**
    * Store a message in long-term memory with its embedding.
+   * Dual-write: D1 (structured) + Vectorize (semantic search).
    */
   async store(text: string, role: 'user' | 'assistant', chatId: number | string): Promise<string> {
     const id = `${this.instanceId}:${Date.now()}:${crypto.randomUUID().slice(0, 8)}`
@@ -31,18 +40,34 @@ export class Memory {
     // Generate embedding
     const embedding = await this.embed(text)
 
-    // Upsert into Vectorize
-    await this.vectorIndex.upsert([{
-      id,
-      values: embedding,
-      metadata: {
-        text: text.slice(0, 1000), // Vectorize metadata size limit
-        role,
-        timestamp,
-        chat_id: chatId,
-        instance_id: this.instanceId,
-      },
-    }])
+    // Dual-write: D1 + Vectorize (parallel)
+    const writes: Promise<any>[] = [
+      // Vectorize upsert
+      this.vectorIndex.upsert([{
+        id,
+        values: embedding,
+        metadata: {
+          text: text.slice(0, 1000), // Vectorize metadata size limit
+          role,
+          timestamp,
+          chat_id: chatId,
+          instance_id: this.instanceId,
+        },
+      }]),
+    ]
+
+    // D1 insert (if available)
+    if (this.hasD1 && this.db) {
+      writes.push(
+        this.db.prepare(`
+          INSERT INTO memories (id, instance_id, text, role, chat_id, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?)
+        `).bind(id, this.instanceId, text, role, String(chatId), timestamp).run()
+      )
+    }
+
+    // Wait for both (but don't fail if one fails)
+    await Promise.allSettled(writes)
 
     return id
   }
@@ -87,9 +112,36 @@ export class Memory {
   /**
    * Time-range recall: get messages from a specific time period.
    * Useful for "what did we talk about yesterday?"
+   * 
+   * Now uses D1 for accurate time-range queries (Issue #8).
+   * Falls back to Vectorize if D1 not available (legacy mode).
    */
   async recall(startTime: number, endTime: number, limit = 20): Promise<MemoryEntry[]> {
-    // Use a neutral embedding — but fetch more than needed and sort by time
+    // D1 path: accurate time-range query
+    if (this.hasD1 && this.db) {
+      try {
+        const result = await this.db.prepare(`
+          SELECT id, text, role, timestamp, chat_id, instance_id
+          FROM memories
+          WHERE instance_id = ? AND timestamp BETWEEN ? AND ?
+          ORDER BY timestamp DESC
+          LIMIT ?
+        `).bind(this.instanceId, startTime, endTime, limit).all()
+
+        return (result.results || []).map((row: any) => ({
+          id: row.id,
+          text: row.text,
+          role: row.role as 'user' | 'assistant',
+          timestamp: row.timestamp,
+          chatId: row.chat_id,
+          instanceId: row.instance_id,
+        }))
+      } catch (e) {
+        console.error('[Memory] D1 recall failed, falling back to Vectorize:', e)
+      }
+    }
+
+    // Vectorize fallback: use a neutral embedding — but fetch more than needed and sort by time
     const neutralText = 'conversation message recall'
     const embedding = await this.embed(neutralText)
 
@@ -121,8 +173,22 @@ export class Memory {
 
   /**
    * Get count of stored memories for this instance.
+   * Now uses D1 for exact count (Issue #8).
    */
   async count(): Promise<number> {
+    // D1 path: exact count
+    if (this.hasD1 && this.db) {
+      try {
+        const result = await this.db.prepare(`
+          SELECT COUNT(*) as count FROM memories WHERE instance_id = ?
+        `).bind(this.instanceId).first()
+        return (result as any)?.count || 0
+      } catch (e) {
+        console.error('[Memory] D1 count failed, falling back to Vectorize estimate:', e)
+      }
+    }
+
+    // Vectorize fallback: estimate via high topK query
     try {
       const embedding = await this.embed('memory count')
       const results = await this.vectorIndex.query(embedding, {
@@ -138,10 +204,23 @@ export class Memory {
 
   /**
    * Delete a specific memory entry.
+   * Dual-delete: D1 + Vectorize.
    */
   async forget(id: string): Promise<boolean> {
+    const deletes: Promise<any>[] = [
+      // Vectorize delete
+      this.vectorIndex.deleteByIds([id]),
+    ]
+
+    // D1 delete (if available)
+    if (this.hasD1 && this.db) {
+      deletes.push(
+        this.db.prepare(`DELETE FROM memories WHERE id = ?`).bind(id).run()
+      )
+    }
+
     try {
-      await this.vectorIndex.deleteByIds([id])
+      await Promise.allSettled(deletes)
       return true
     } catch {
       return false
