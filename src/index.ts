@@ -93,6 +93,58 @@ export default {
       })
     }
 
+    // Direct chat API (non-Telegram, for agents/CLI)
+    // POST /chat { "message": "...", "chat_id": "xiaoju" }
+    if (url.pathname === '/chat' && request.method === 'POST') {
+      const auth = request.headers.get('Authorization')
+      if (auth !== `Bearer ${env.SIGIL_DEPLOY_TOKEN}`) {
+        return new Response('Unauthorized', { status: 401 })
+      }
+      const body: any = await request.json()
+      if (!body.message) {
+        return new Response(JSON.stringify({ error: 'message required' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      const chatId = body.chat_id || 'api'
+      const sigil = new SigilClient(env.SIGIL_URL, env.SIGIL_DEPLOY_TOKEN)
+      const llm = new LlmClient(
+        env.DASHSCOPE_API_KEY,
+        env.LLM_MODEL || undefined,
+        env.LLM_BASE_URL || undefined,
+      )
+      const chatStore = new ChatStore(env.CHAT_KV)
+      const soul = new Soul(env.CHAT_KV, instanceId)
+      const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
+
+      try {
+        // Store user message
+        const storePromise = memory.store(body.message, 'user', chatId)
+
+        // Load + compress history
+        let messages = await chatStore.load(chatId)
+        const { messages: compressed } = chatStore.maybeCompress(messages)
+        messages = compressed
+        messages.push({ role: 'user', content: body.message })
+
+        // Run agentic loop
+        const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory)
+
+        // Store reply + save history
+        await chatStore.save(chatId, updatedMessages)
+        await Promise.allSettled([storePromise, memory.store(reply, 'assistant', chatId)])
+
+        return new Response(JSON.stringify({ reply, chat_id: chatId }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 500, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
     // Memory stats API
     if (url.pathname === '/memory' && request.method === 'GET') {
       const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)

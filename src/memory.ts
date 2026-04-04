@@ -24,7 +24,7 @@ export class Memory {
   /**
    * Store a message in long-term memory with its embedding.
    */
-  async store(text: string, role: 'user' | 'assistant', chatId: number): Promise<string> {
+  async store(text: string, role: 'user' | 'assistant', chatId: number | string): Promise<string> {
     const id = `${this.instanceId}:${Date.now()}:${crypto.randomUUID().slice(0, 8)}`
     const timestamp = Date.now()
 

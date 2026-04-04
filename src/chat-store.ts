@@ -26,11 +26,11 @@ const CHAT_TTL = 86400
 export class ChatStore {
   constructor(private kv: KVNamespace) {}
 
-  private key(chatId: number): string {
+  private key(chatId: number | string): string {
     return `chat:${chatId}`
   }
 
-  async load(chatId: number): Promise<ChatMessage[]> {
+  async load(chatId: number | string): Promise<ChatMessage[]> {
     const raw = await this.kv.get(this.key(chatId))
     if (!raw) return []
     try {
@@ -40,13 +40,13 @@ export class ChatStore {
     }
   }
 
-  async save(chatId: number, messages: ChatMessage[]): Promise<void> {
+  async save(chatId: number | string, messages: ChatMessage[]): Promise<void> {
     // Strip system messages before saving (reconstructed each request)
     const toSave = messages.filter(m => m.role !== 'system')
     await this.kv.put(this.key(chatId), JSON.stringify(toSave), { expirationTtl: CHAT_TTL })
   }
 
-  async clear(chatId: number): Promise<void> {
+  async clear(chatId: number | string): Promise<void> {
     await this.kv.delete(this.key(chatId))
   }
 
