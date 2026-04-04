@@ -278,15 +278,22 @@ export class LlmClient {
     const activeTemp = params.temperature
     messages = params.messages  // possibly compressed
     
+    // VL models don't support tools or enable_thinking properly
+    const isVisionModel = activeModel.includes('-vl-')
+    if (isVisionModel) {
+      console.log(`[Pipeline] Vision model detected — disabling tools & thinking`)
+    }
+
     console.log(`[Pipeline] model=${activeModel} temp=${activeTemp} msgs=${messages.length}`)
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      // Derive dynamic tools from chat history
-      const dynamicCaps = extractCapabilitiesFromHistory(messages)
-      const dynamicTools = dynamicCaps.map(capabilityToTool)
-      const allTools = [...STATIC_TOOLS, ...dynamicTools]
+      // Derive dynamic tools from chat history (skip for vision models)
+      const allTools = isVisionModel ? [] : [
+        ...STATIC_TOOLS,
+        ...extractCapabilitiesFromHistory(messages).map(capabilityToTool),
+      ]
 
-      const response = await this.chatWithTools(messages, allTools, activeModel, activeTemp)
+      const response = await this.chatWithTools(messages, allTools, activeModel, activeTemp, isVisionModel)
 
       // No tool calls → final answer
       if (!response.tool_calls || response.tool_calls.length === 0) {
@@ -335,6 +342,7 @@ export class LlmClient {
     tools: ToolDef[],
     model?: string,
     temperature?: number,
+    skipThinking?: boolean,
   ): Promise<{ content: string | null; tool_calls?: ToolCall[] }> {
     // Use provided params or fall back to instance defaults
     const activeModel = model || this.model
@@ -355,7 +363,7 @@ export class LlmClient {
             messages,
             tools: tools.length > 0 ? tools : undefined,
             temperature: activeTemp,
-            enable_thinking: true,
+            ...(skipThinking ? {} : { enable_thinking: true }),
           }),
           signal: AbortSignal.timeout(30000),  // 30s timeout
         })
