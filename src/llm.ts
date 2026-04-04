@@ -81,15 +81,14 @@ const MEMORY_TOOLS: ToolDef[] = [
     type: 'function',
     function: {
       name: 'memory_recall',
-      description: 'Recall messages from a specific time period. Use for questions like "what did we talk about yesterday?" or "what happened last week?". Returns messages sorted by time.',
+      description: 'Recall recent conversations across ALL sessions. Returns the most recent messages sorted by time. Use this when asked about recent activity, visitors, or what happened lately.',
       parameters: {
         type: 'object',
         properties: {
-          start_time: { type: 'string', description: 'Start of time range (ISO 8601, e.g. "2026-04-03T00:00:00Z")' },
-          end_time: { type: 'string', description: 'End of time range (ISO 8601, e.g. "2026-04-03T23:59:59Z")' },
-          limit: { type: 'number', description: 'Max messages (default 20)' },
+          hours: { type: 'number', description: 'How many hours back to look (default 24, max 168)' },
+          limit: { type: 'number', description: 'Max messages to return (default 30)' },
         },
-        required: ['start_time'],
+        required: [],
       },
     },
   },
@@ -371,10 +370,12 @@ export class LlmClient {
     }
 
     if (name === 'memory_recall') {
-      const startTime = new Date(args.start_time).getTime()
-      const endTime = args.end_time ? new Date(args.end_time).getTime() : Date.now()
-      const results = await memory.recall(startTime, endTime, args.limit || 20)
-      return JSON.stringify({ entries: results, total: results.length })
+      const hours = Math.min(args.hours || 24, 168)  // default 24h, max 7 days
+      const limit = Math.min(args.limit || 30, 100)
+      const endTime = Date.now()
+      const startTime = endTime - hours * 60 * 60 * 1000
+      const results = await memory.recall(startTime, endTime, limit)
+      return JSON.stringify({ entries: results, total: results.length, hours, timeRange: { start: new Date(startTime).toISOString(), end: new Date(endTime).toISOString() } })
     }
 
     if (name === 'memory_forget') {

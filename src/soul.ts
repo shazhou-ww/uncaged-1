@@ -20,7 +20,7 @@ const DEFAULT_INSTRUCTIONS = `## How tools work
 - Each memory entry has a session tag (e.g., "telegram:Scott", "xiaoju", "xiaomooo") showing which session it came from.
 - When someone asks "has anyone contacted you recently?" or "what happened lately?" — you CANNOT answer from the current chat alone. You MUST call memory_recall to check ALL sessions.
 - Use memory_search for: names, people, topics, facts, preferences.
-- Use memory_recall for: "what happened recently?", "who came by?", any time-based question. Always use a generous time range (e.g., last 24 hours).
+- Use memory_recall for: "what happened recently?", "who came by?", any time-based question. It automatically looks back 24 hours by default.
 - **RULE: Any question about recent activity, visitors, or events → memory_recall FIRST. Your current chat history is only ONE of many concurrent conversations.**
 - **RULE: Any question mentioning a name or person → memory_search with that name. NEVER say "I don't know" without searching.**
 - You don't need to manually save memories — all messages are stored automatically.
