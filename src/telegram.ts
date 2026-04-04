@@ -5,6 +5,7 @@ import { LlmClient } from './llm.js'
 import { ChatStore, type ContentPart } from './chat-store.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
+import { arrayBufferToBase64 } from './utils.js'
 import type { Env } from './index.js'
 
 interface TelegramUpdate {
@@ -127,12 +128,30 @@ export async function handleTelegramWebhook(
       
       console.log('[Multimodal] Photo detected, file_id:', fileId)
       
-      // Get file URL from Telegram
+      // Get file path from Telegram
       const fileRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`)
       const fileData = await fileRes.json() as any
       if (fileData.ok && fileData.result.file_path) {
-        imageUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileData.result.file_path}`
-        console.log('[Multimodal] Image URL:', imageUrl)
+        const filePath = fileData.result.file_path
+        const telegramUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`
+        
+        // Download image and convert to base64 data URI
+        try {
+          const imgResponse = await fetch(telegramUrl)
+          if (imgResponse.ok) {
+            const arrayBuffer = await imgResponse.arrayBuffer()
+            const base64 = arrayBufferToBase64(arrayBuffer)
+            
+            // Detect MIME type from file extension
+            const ext = filePath.split('.').pop()?.toLowerCase() || 'jpg'
+            const mimeType = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg'
+            
+            imageUrl = `data:${mimeType};base64,${base64}`
+            console.log(`[Multimodal] Image converted to base64 data URI (${arrayBuffer.byteLength} bytes, ${mimeType})`)
+          }
+        } catch (e) {
+          console.error('[Multimodal] Failed to download image:', e)
+        }
       }
     }
 

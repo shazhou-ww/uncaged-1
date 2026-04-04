@@ -4,6 +4,7 @@ import { LlmClient } from './llm.js'
 import { ChatStore, type ContentPart } from './chat-store.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
+import { arrayBufferToBase64 } from './utils.js'
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string
@@ -172,9 +173,27 @@ export default {
         
         // Add user message (multimodal or text-only)
         if (body.image_url) {
+          let finalImageUrl = body.image_url
+          
+          // If not already a data URI, download and convert to base64
+          if (!finalImageUrl.startsWith('data:')) {
+            try {
+              const imgRes = await fetch(finalImageUrl)
+              if (imgRes.ok) {
+                const buf = await imgRes.arrayBuffer()
+                const base64 = arrayBufferToBase64(buf)
+                const contentType = imgRes.headers.get('content-type') || 'image/jpeg'
+                finalImageUrl = `data:${contentType};base64,${base64}`
+                console.log(`[Multimodal] /chat API: Converted external URL to base64 data URI (${buf.byteLength} bytes, ${contentType})`)
+              }
+            } catch (e) {
+              console.error('[Multimodal] Failed to download image for /chat:', e)
+            }
+          }
+          
           const content: ContentPart[] = [
             { type: 'text', text: body.message },
-            { type: 'image_url', image_url: { url: body.image_url } }
+            { type: 'image_url', image_url: { url: finalImageUrl } }
           ]
           messages.push({ role: 'user', content })
           console.log('[Multimodal] /chat API: Added multimodal message')
