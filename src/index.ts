@@ -17,6 +17,7 @@ export interface Env {
   CHAT_KV: KVNamespace
   MEMORY_INDEX: VectorizeIndex
   MEMORY_DB?: D1Database // Optional: structured memory storage (Issue #8)
+  A2A_TOKEN?: string     // Optional: A2A auth token for agent collaboration
   AI: any
   DEBUG_ENABLED?: string
 }
@@ -45,6 +46,7 @@ export default {
         env.LLM_MODEL || undefined,
         env.LLM_BASE_URL || undefined,
       )
+      llm.a2aToken = env.A2A_TOKEN
       const chatStore = new ChatStore(env.CHAT_KV)
       const soul = new Soul(env.CHAT_KV, instanceId)
       const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId, env.MEMORY_DB)
@@ -116,6 +118,7 @@ export default {
         env.LLM_MODEL || undefined,
         env.LLM_BASE_URL || undefined,
       )
+      llm.a2aToken = env.A2A_TOKEN
       const chatStore = new ChatStore(env.CHAT_KV)
       const soul = new Soul(env.CHAT_KV, instanceId)
       const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId, env.MEMORY_DB)

@@ -6,6 +6,7 @@ import { Soul } from './soul.js'
 import { Memory } from './memory.js'
 import type { ChatMessage, ToolCall } from './chat-store.js'
 import { createCapabilityTool, handleCreateCapability, type CreateCapabilityArgs } from './tools/create-capability.js'
+import { askAgentTool, handleAskAgent, type AskAgentArgs } from './tools/ask-agent.js'
 import { 
   distillKnowledgeTool, 
   recallKnowledgeTool,
@@ -30,6 +31,7 @@ const BUILTIN_TOOLS: ToolDef[] = [
   createCapabilityTool,  // self-evolution
   distillKnowledgeTool,  // knowledge distillation
   recallKnowledgeTool,   // knowledge recall
+  askAgentTool,          // A2A agent collaboration
 ]
 
 // ─── Static tools: always available ───
@@ -208,11 +210,12 @@ function capabilityToTool(cap: CapabilityInfo): ToolDef {
 
 // ─── Agent loop ───
 
-const MAX_TOOL_ROUNDS = 6
+const MAX_TOOL_ROUNDS = 12
 
 export class LlmClient {
   private model: string
   private baseUrl: string
+  public a2aToken?: string
 
   constructor(
     private apiKey: string,
@@ -413,6 +416,11 @@ export class LlmClient {
 
     if (name === 'recall_knowledge') {
       return await handleRecallKnowledge(args as RecallKnowledgeArgs, memory)
+    }
+
+    // ── A2A collaboration ──
+    if (name === 'ask_agent') {
+      return await handleAskAgent(args as AskAgentArgs, this.a2aToken)
     }
 
     // ── Dynamic capability tools ──
