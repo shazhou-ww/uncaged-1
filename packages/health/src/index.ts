@@ -295,6 +295,24 @@ export default {
       return handleHistoryRequest(request, env);
     }
 
+    // Proxy baton stats from main uncaged worker
+    if (url.pathname === '/baton/stats') {
+      try {
+        const res = await uncagedFetch(env, '/baton/stats', {
+          method: 'GET',
+          headers: authHeaders(env),
+          signal: AbortSignal.timeout(10000),
+        });
+        const data = await res.text();
+        return new Response(data, {
+          status: res.status,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch (e) {
+        return Response.json({ error: 'Failed to fetch baton stats' }, { status: 502 });
+      }
+    }
+
     return Response.json({ error: 'Not found' }, { status: 404 });
   },
 

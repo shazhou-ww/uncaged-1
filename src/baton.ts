@@ -214,6 +214,43 @@ export class BatonStore {
 
   // ── Helpers ──
 
+  async stats(): Promise<{
+    total: number
+    by_status: Record<string, number>
+    by_depth: Record<number, number>
+    recent: Baton[]
+    avg_duration_ms: number | null
+  }> {
+    const [countResult, statusResult, depthResult, recentResult, durationResult] = await Promise.all([
+      this.db.prepare('SELECT COUNT(*) as total FROM batons').first(),
+      this.db.prepare('SELECT status, COUNT(*) as count FROM batons GROUP BY status').all(),
+      this.db.prepare('SELECT depth, COUNT(*) as count FROM batons GROUP BY depth ORDER BY depth').all(),
+      this.db.prepare('SELECT * FROM batons ORDER BY created_at DESC LIMIT 10').all(),
+      this.db.prepare(`
+        SELECT AVG(updated_at - created_at) as avg_ms
+        FROM batons WHERE status IN ('completed', 'failed')
+      `).first(),
+    ])
+
+    const by_status: Record<string, number> = {}
+    for (const row of statusResult.results) {
+      by_status[row.status as string] = row.count as number
+    }
+
+    const by_depth: Record<number, number> = {}
+    for (const row of depthResult.results) {
+      by_depth[row.depth as number] = row.count as number
+    }
+
+    return {
+      total: (countResult?.total as number) || 0,
+      by_status,
+      by_depth,
+      recent: recentResult.results.map(r => this.rowToBaton(r)),
+      avg_duration_ms: (durationResult?.avg_ms as number) || null,
+    }
+  }
+
   private rowToBaton(row: Record<string, unknown>): Baton {
     return {
       id: row.id as string,

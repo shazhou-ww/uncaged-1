@@ -88,6 +88,34 @@ export function renderDashboard(): string {
   .status-dot.degraded { background: #d29922; }
   .status-dot.down { background: #f85149; }
 
+  .baton-stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .baton-stat {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 12px 18px; text-align: center; min-width: 90px;
+  }
+  .baton-stat .num { font-size: 24px; font-weight: 700; }
+  .baton-stat .label { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  .baton-stat.pending .num { color: #d29922; }
+  .baton-stat.running .num { color: #58a6ff; }
+  .baton-stat.completed .num { color: #3fb950; }
+  .baton-stat.failed .num { color: #f85149; }
+  .baton-stat.spawned .num { color: #bc8cff; }
+  .baton-stat.total .num { color: #e6edf3; }
+
+  .baton-table {
+    width: 100%; border-collapse: collapse;
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden;
+  }
+  .baton-table th, .baton-table td { padding: 8px 12px; text-align: left; font-size: 12px; }
+  .baton-table th { background: #1c2129; color: #8b949e; font-weight: 600; border-bottom: 1px solid #30363d; }
+  .baton-table tr:not(:last-child) td { border-bottom: 1px solid #21262d; }
+  .baton-table .st { padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+  .st.pending { background: #9a6700; color: #fff; }
+  .st.running { background: #1f6feb; color: #fff; }
+  .st.completed { background: #1a7f37; color: #fff; }
+  .st.failed { background: #cf222e; color: #fff; }
+  .st.spawned { background: #8957e5; color: #fff; }
+
   .meta { font-size: 12px; color: #484f58; text-align: center; margin-top: 24px; }
   .refresh-btn {
     background: #21262d; border: 1px solid #30363d; color: #8b949e;
@@ -115,6 +143,17 @@ export function renderDashboard(): string {
   <div class="card"><div class="indicator unknown"></div><h3>Liveness</h3><div class="value">—</div></div>
   <div class="card"><div class="indicator unknown"></div><h3>Chat</h3><div class="value">—</div></div>
   <div class="card"><div class="indicator unknown"></div><h3>Memory</h3><div class="value">—</div></div>
+</div>
+
+<div class="section">
+  <h2>🏃 Baton Tasks</h2>
+  <div class="baton-stats" id="batonStats">
+    <div class="baton-stat total"><div class="num">—</div><div class="label">Total</div></div>
+  </div>
+  <table class="baton-table" id="batonTable">
+    <thead><tr><th>ID</th><th>Status</th><th>Depth</th><th>Prompt</th><th>Duration</th><th>Time</th></tr></thead>
+    <tbody id="batonBody"><tr><td colspan="6" style="color:#484f58">Loading...</td></tr></tbody>
+  </table>
 </div>
 
 <div class="section">
@@ -225,10 +264,46 @@ async function loadHistory() {
   }
 }
 
-function loadAll() { loadLatest(); loadHistory(); }
+async function loadBatons() {
+  const batonStats = document.getElementById('batonStats');
+  const batonBody = document.getElementById('batonBody');
+  try {
+    const res = await fetch('/baton/stats');
+    if (!res.ok) throw new Error('No baton data');
+    const d = await res.json();
+    const statuses = ['pending', 'running', 'completed', 'failed', 'spawned'];
+    batonStats.innerHTML = '<div class="baton-stat total"><div class="num">' + (d.total || 0) + '</div><div class="label">Total</div></div>'
+      + statuses.map(s => {
+        const n = d.by_status?.[s] || 0;
+        return '<div class="baton-stat ' + s + '"><div class="num">' + n + '</div><div class="label">' + s + '</div></div>';
+      }).join('')
+      + (d.avg_duration_ms ? '<div class="baton-stat"><div class="num">' + Math.round(d.avg_duration_ms / 1000) + 's</div><div class="label">Avg Time</div></div>' : '');
+
+    if (d.recent && d.recent.length > 0) {
+      batonBody.innerHTML = d.recent.map(b => {
+        const dur = (b.status === 'completed' || b.status === 'failed') ? Math.round((b.updated_at - b.created_at) / 1000) + 's' : '—';
+        const prompt = (b.prompt || '').slice(0, 60) + (b.prompt?.length > 60 ? '…' : '');
+        return '<tr><td style="font-family:monospace;font-size:11px">' + b.id + '</td>'
+          + '<td><span class="st ' + b.status + '">' + b.status + '</span></td>'
+          + '<td>' + b.depth + '</td>'
+          + '<td title="' + (b.prompt || '').replace(/"/g,'&quot;').slice(0, 200) + '">' + prompt + '</td>'
+          + '<td>' + dur + '</td>'
+          + '<td>' + fmtTime(b.created_at) + '</td></tr>';
+      }).join('');
+    } else {
+      batonBody.innerHTML = '<tr><td colspan="6" style="color:#484f58">No tasks yet</td></tr>';
+    }
+  } catch {
+    batonStats.innerHTML = '<div class="baton-stat"><div class="num">—</div><div class="label">Unavailable</div></div>';
+    batonBody.innerHTML = '<tr><td colspan="6" style="color:#484f58">Failed to load</td></tr>';
+  }
+}
+
+function loadAll() { loadLatest(); loadHistory(); loadBatons(); }
 loadAll();
 setInterval(loadLatest, 60000);
 setInterval(loadHistory, 300000);
+setInterval(loadBatons, 30000);
 </script>
 </body>
 </html>`;

@@ -300,8 +300,15 @@ export default {
       }
       const parts = url.pathname.split('/')
       const batonId = parts[2]
-      const action = parts[3]  // 'tree' or undefined
+      const action = parts[3]  // 'tree' or 'stats' or undefined
       const store = new BatonStore(env.BATON_DB, env.BATON_QUEUE)
+
+      if (batonId === 'stats') {
+        const stats = await store.stats()
+        return new Response(JSON.stringify(stats), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
 
       if (action === 'tree') {
         const tree = await store.loadTree(batonId)
