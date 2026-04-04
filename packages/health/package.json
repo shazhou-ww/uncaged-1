@@ -1,0 +1,18 @@
+{
+  "name": "uncaged-health",
+  "version": "0.1.0",
+  "description": "Health monitoring worker for Uncaged AI Agent",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "小橘 <xiaoju@shazhou.work>",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260403.1",
+    "typescript": "^6.0.2",
+    "wrangler": "^4.80.0"
+  }
+}
