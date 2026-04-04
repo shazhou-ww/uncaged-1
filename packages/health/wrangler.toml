@@ -9,6 +9,11 @@ crons = ["*/5 * * * *"]
 UNCAGED_URL = "https://doudou.shazhou.work"
 OC_STATUS_URL = "https://oc-status.shazhou.workers.dev"
 
+# Service binding: call uncaged worker directly (bypasses 1042 / DNS issues)
+[[services]]
+binding = "UNCAGED"
+service = "uncaged"
+
 # Secrets (set via `wrangler secret put`):
 # - UNCAGED_AUTH_TOKEN: Bearer token for Uncaged API
 # - OC_STATUS_TOKEN: Bearer token for oc-status heartbeat

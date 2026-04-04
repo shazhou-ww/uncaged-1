@@ -8,6 +8,7 @@ import { renderDashboard } from './dashboard.js';
 interface Env {
   HEALTH_KV: KVNamespace;
   UNCAGED_URL: string;
+  UNCAGED: Fetcher;  // Service binding to uncaged worker
   OC_STATUS_URL: string;
   UNCAGED_AUTH_TOKEN?: string;  // Bearer token for Uncaged API
   OC_STATUS_TOKEN?: string;
@@ -44,10 +45,23 @@ function authHeaders(env: Env): Record<string, string> {
     : {};
 }
 
+/**
+ * Fetch from uncaged worker via Service Binding (preferred) or URL fallback.
+ * Service Binding avoids CF error 1042 / DNS issues between same-account workers.
+ */
+function uncagedFetch(env: Env, path: string, init?: RequestInit): Promise<Response> {
+  if (env.UNCAGED) {
+    // Service Binding: use a dummy origin, the binding routes internally
+    return env.UNCAGED.fetch(`https://uncaged${path}`, init);
+  }
+  // Fallback to URL
+  return fetch(`${env.UNCAGED_URL}${path}`, init);
+}
+
 async function checkLiveness(env: Env): Promise<CheckResult> {
   try {
     const [response, latency] = await measureLatency(() =>
-      fetch(env.UNCAGED_URL, {
+      uncagedFetch(env, '/', {
         method: 'GET',
         headers: authHeaders(env),
         signal: AbortSignal.timeout(10000),
@@ -77,7 +91,7 @@ async function checkChat(env: Env): Promise<CheckResult> {
   // Use /help command instead of real chat to avoid memory pollution (#17 review)
   try {
     const [response, latency] = await measureLatency(() =>
-      fetch(`${env.UNCAGED_URL}/chat`, {
+      uncagedFetch(env, '/chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -115,7 +129,7 @@ async function checkChat(env: Env): Promise<CheckResult> {
 async function checkMemory(env: Env): Promise<CheckResult> {
   try {
     const [response, latency] = await measureLatency(() =>
-      fetch(`${env.UNCAGED_URL}/memory?q=test`, {
+      uncagedFetch(env, '/memory?q=test', {
         method: 'GET',
         headers: authHeaders(env),
         signal: AbortSignal.timeout(10000),
