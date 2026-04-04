@@ -36,10 +36,15 @@ export async function handleSpawnTask(
   parentBatonId: string,
   batonStore: BatonStore,
 ): Promise<string> {
+  // Get parent depth so children are depth+1
+  const parent = await batonStore.load(parentBatonId)
+  const parentDepth = parent?.depth ?? 0
+
   const baton = await batonStore.create({
     prompt: args.prompt,
     hints: args.hints,
     parent_id: parentBatonId,
+    depth: parentDepth + 1,
   })
 
   return JSON.stringify({
