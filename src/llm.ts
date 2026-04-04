@@ -5,6 +5,13 @@ import { SigilClient } from './sigil.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
 import type { ChatMessage, ToolCall } from './chat-store.js'
+import { 
+  compose, 
+  baseAdapter, 
+  modelSelector, 
+  temperatureAdapter, 
+  contextCompressor 
+} from './pipeline.js'
 import { createCapabilityTool, handleCreateCapability, type CreateCapabilityArgs } from './tools/create-capability.js'
 import { askAgentTool, handleAskAgent, type AskAgentArgs } from './tools/ask-agent.js'
 import { 
@@ -247,13 +254,35 @@ export class LlmClient {
       messages[0].content = systemPrompt
     }
 
+    // ── Apply pipeline ──
+    const pipeline = compose(
+      baseAdapter(this.model),
+      modelSelector(),
+      temperatureAdapter(),
+      contextCompressor(30),
+    )
+    
+    const params = await pipeline(messages, {
+      model: this.model,
+      temperature: 0.3,
+      enableThinking: true,
+      messages,
+    })
+    
+    // Use pipeline-determined params
+    const activeModel = params.model
+    const activeTemp = params.temperature
+    messages = params.messages  // possibly compressed
+    
+    console.log(`[Pipeline] model=${activeModel} temp=${activeTemp} msgs=${messages.length}`)
+
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       // Derive dynamic tools from chat history
       const dynamicCaps = extractCapabilitiesFromHistory(messages)
       const dynamicTools = dynamicCaps.map(capabilityToTool)
       const allTools = [...STATIC_TOOLS, ...dynamicTools]
 
-      const response = await this.chatWithTools(messages, allTools)
+      const response = await this.chatWithTools(messages, allTools, activeModel, activeTemp)
 
       // No tool calls → final answer
       if (!response.tool_calls || response.tool_calls.length === 0) {
@@ -300,7 +329,13 @@ export class LlmClient {
   private async chatWithTools(
     messages: ChatMessage[],
     tools: ToolDef[],
+    model?: string,
+    temperature?: number,
   ): Promise<{ content: string | null; tool_calls?: ToolCall[] }> {
+    // Use provided params or fall back to instance defaults
+    const activeModel = model || this.model
+    const activeTemp = temperature ?? 0.3
+    
     const maxRetries = 2
     
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -312,10 +347,10 @@ export class LlmClient {
             'Authorization': `Bearer ${this.apiKey}`,
           },
           body: JSON.stringify({
-            model: this.model,
+            model: activeModel,
             messages,
             tools: tools.length > 0 ? tools : undefined,
-            temperature: 0.3,
+            temperature: activeTemp,
             enable_thinking: true,
           }),
           signal: AbortSignal.timeout(30000),  // 30s timeout
