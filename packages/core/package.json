@@ -1,0 +1,62 @@
+{
+  "name": "@uncaged/core",
+  "version": "0.1.0",
+  "description": "Core logic for Uncaged agents",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "exports": {
+    "./env": {
+      "types": "./dist/env.d.ts",
+      "default": "./dist/env.js"
+    },
+    "./llm": {
+      "types": "./dist/llm.d.ts",
+      "default": "./dist/llm.js"
+    },
+    "./baton-runner": {
+      "types": "./dist/baton-runner.d.ts",
+      "default": "./dist/baton-runner.js"
+    },
+    "./sigil": {
+      "types": "./dist/sigil.d.ts",
+      "default": "./dist/sigil.js"
+    },
+    "./soul": {
+      "types": "./dist/soul.d.ts",
+      "default": "./dist/soul.js"
+    },
+    "./memory": {
+      "types": "./dist/memory.d.ts",
+      "default": "./dist/memory.js"
+    },
+    "./chat-store": {
+      "types": "./dist/chat-store.d.ts",
+      "default": "./dist/chat-store.js"
+    },
+    "./baton": {
+      "types": "./dist/baton.d.ts",
+      "default": "./dist/baton.js"
+    },
+    "./utils": {
+      "types": "./dist/utils.d.ts",
+      "default": "./dist/utils.js"
+    },
+    "./tools/*": {
+      "types": "./dist/tools/*.d.ts",
+      "default": "./dist/tools/*.js"
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260403.1",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.2"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^4.20260403.1"
+  }
+}

@@ -1,37 +1,45 @@
-import { handleTelegramWebhook } from './telegram.js'
-import { SigilClient } from './sigil.js'
-import { LlmClient } from './llm.js'
-import { ChatStore, type ContentPart } from './chat-store.js'
-import { Soul } from './soul.js'
-import { Memory } from './memory.js'
-import { storeImageForVL } from './utils.js'
-import { BatonStore } from './baton.js'
-import type { BatonEvent } from './baton.js'
-import { handleBatonQueue } from './baton-runner.js'
+// Doudou instance - Telegram Bot implementation of Uncaged
 
-export interface Env {
+import { 
+  handleBatonQueue, 
+  type NotifyFn 
+} from '@uncaged/core/baton-runner'
+import { 
+  SigilClient 
+} from '@uncaged/core/sigil'
+import { 
+  LlmClient 
+} from '@uncaged/core/llm'
+import { 
+  ChatStore, 
+  type ContentPart 
+} from '@uncaged/core/chat-store'
+import { 
+  Soul 
+} from '@uncaged/core/soul'
+import { 
+  Memory 
+} from '@uncaged/core/memory'
+import { 
+  BatonStore,
+  type BatonEvent 
+} from '@uncaged/core/baton'
+import { 
+  storeImageForVL 
+} from '@uncaged/core/utils'
+import type { Env } from '@uncaged/core/env'
+import { handleTelegramWebhook, sendTelegram } from './telegram.js'
+
+// Doudou-specific environment (extends core Env)
+export interface DoudouEnv extends Env {
   TELEGRAM_BOT_TOKEN: string
-  DASHSCOPE_API_KEY: string
-  LLM_MODEL: string
-  LLM_BASE_URL: string
-  SIGIL_DEPLOY_TOKEN: string
-  SIGIL_URL: string
-  INSTANCE_ID: string
   ALLOWED_CHAT_IDS: string
-  CHAT_KV: KVNamespace
-  MEMORY_INDEX: VectorizeIndex
-  MEMORY_DB?: D1Database // Optional: structured memory storage (Issue #8)
-  BATON_DB?: D1Database  // Baton task relay storage
-  BATON_QUEUE?: Queue<import('./baton.js').BatonEvent>  // Baton event queue
-  A2A_TOKEN?: string     // Optional: A2A auth token for agent collaboration
-  AI: any
-  DEBUG_ENABLED?: string
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: DoudouEnv, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
-    const instanceId = env.INSTANCE_ID || 'default'
+    const instanceId = env.INSTANCE_ID || 'doudou'
 
     // Health check
     if (url.pathname === '/' && request.method === 'GET') {
@@ -402,12 +410,29 @@ export default {
   },
 
   // ─── Baton Queue Consumer ───
-  async queue(batch: MessageBatch<BatonEvent>, env: Env): Promise<void> {
+  async queue(batch: MessageBatch<BatonEvent>, env: DoudouEnv): Promise<void> {
     if (!env.BATON_DB || !env.BATON_QUEUE) {
       console.error('[Baton Queue] BATON_DB or BATON_QUEUE not configured')
       return
     }
     const store = new BatonStore(env.BATON_DB, env.BATON_QUEUE)
-    await handleBatonQueue(batch, env, store)
+    
+    // Define Telegram notification function
+    const telegramNotify: NotifyFn = async (baton, result, error) => {
+      if (!baton.notify || !baton.channel) return
+      
+      if (baton.channel.startsWith('telegram:')) {
+        const chatId = parseInt(baton.channel.split(':')[1])
+        if (isNaN(chatId)) return
+        
+        const message = error
+          ? `⚠️ Task failed: ${error}`
+          : result || '(no result)'
+        
+        await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, message)
+      }
+    }
+    
+    await handleBatonQueue(batch, env, store, telegramNotify)
   },
 }

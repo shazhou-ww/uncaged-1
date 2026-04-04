@@ -3,17 +3,18 @@
   "version": "0.1.0",
   "description": "Sigil-native AI Agent — CF Worker + Telegram Bot",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "test": "vitest run"
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "deploy:doudou": "npm run deploy -w packages/doudou"
   },
   "author": "小橘 <xiaoju@shazhou.work>",
   "license": "MIT",
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260403.1",
     "typescript": "^6.0.2",
-    "vitest": "^4.1.2",
     "wrangler": "^4.80.0"
   }
 }

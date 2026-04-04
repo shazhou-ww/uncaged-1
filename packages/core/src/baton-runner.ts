@@ -2,13 +2,15 @@
 // This is the core of the Baton system: a stateless worker
 // that picks up a Baton, runs an agentic loop, and reports results.
 
-import type { Env } from './index.js'
+import type { Env } from './env.js'
 import type { Baton, BatonEvent, BatonStore } from './baton.js'
 import { LlmClient } from './llm.js'
 import { SigilClient } from './sigil.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
-import { sendTelegram } from './telegram.js'
+
+// Notification callback type
+export type NotifyFn = (baton: Baton, result: string | null, error?: string) => Promise<void>
 
 // ─── Queue Consumer ───
 
@@ -16,6 +18,7 @@ export async function handleBatonQueue(
   batch: MessageBatch<BatonEvent>,
   env: Env,
   batonStore: BatonStore,
+  notifyFn?: NotifyFn,
 ): Promise<void> {
   for (const msg of batch.messages) {
     try {
@@ -24,12 +27,12 @@ export async function handleBatonQueue(
 
       switch (event) {
         case 'created':
-          await executeBaton(baton_id, env, batonStore)
+          await executeBaton(baton_id, env, batonStore, notifyFn)
           break
 
         case 'child_completed':
         case 'child_failed':
-          await handleChildDone(baton_id, env, batonStore)
+          await handleChildDone(baton_id, env, batonStore, notifyFn)
           break
       }
 
@@ -47,6 +50,7 @@ async function executeBaton(
   batonId: string,
   env: Env,
   batonStore: BatonStore,
+  notifyFn?: NotifyFn,
 ): Promise<void> {
   const baton = await batonStore.load(batonId)
   if (!baton || baton.status !== 'pending') {
@@ -93,12 +97,12 @@ async function executeBaton(
       console.log(`[Baton] ${batonId} has ${children.length} children, waiting for completion`)
     } else {
       await batonStore.complete(batonId, reply)
-      await maybeNotify(baton, reply, env)
+      if (notifyFn) await notifyFn(baton, reply)
     }
   } catch (e: any) {
     console.error(`[Baton] Execution failed for ${batonId}:`, e)
     await batonStore.fail(batonId, e.message || 'Unknown error')
-    await maybeNotify(baton, null, env, e.message)
+    if (notifyFn) await notifyFn(baton, null, e.message)
   }
 }
 
@@ -108,6 +112,7 @@ async function handleChildDone(
   parentId: string,
   env: Env,
   batonStore: BatonStore,
+  notifyFn?: NotifyFn,
 ): Promise<void> {
   const parent = await batonStore.load(parentId)
   if (!parent || parent.status !== 'spawned') {
@@ -158,11 +163,11 @@ async function handleChildDone(
   try {
     const { reply } = await llm.agentLoop(messages, sigil, soul, memory, `baton:${parent.id}`)
     await batonStore.complete(parent.id, reply)
-    await maybeNotify(parent, reply, env)
+    if (notifyFn) await notifyFn(parent, reply)
   } catch (e: any) {
     console.error(`[Baton] Continuation failed for ${parent.id}:`, e)
     await batonStore.fail(parent.id, e.message)
-    await maybeNotify(parent, null, env, e.message)
+    if (notifyFn) await notifyFn(parent, null, e.message)
   }
 }
 
@@ -188,29 +193,4 @@ function buildBatonSystemPrompt(baton: Baton): string {
   )
 
   return parts.join('\n')
-}
-
-// ─── Notification ───
-
-async function maybeNotify(
-  baton: Baton,
-  result: string | null,
-  env: Env,
-  error?: string,
-): Promise<void> {
-  if (!baton.notify) return
-  if (!baton.channel) return
-
-  if (baton.channel.startsWith('telegram:')) {
-    const chatId = parseInt(baton.channel.split(':')[1])
-    if (isNaN(chatId)) return
-
-    const message = error
-      ? `⚠️ Task failed: ${error}`
-      : result || '(no result)'
-
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, message)
-  }
-
-  // Future: api / a2a channels
 }

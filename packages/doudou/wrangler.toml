@@ -1,5 +1,5 @@
 name = "uncaged"
-main = "src/index.ts"
+main = "dist/index.js"
 compatibility_date = "2026-04-03"
 
 [vars]

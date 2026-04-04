@@ -1,12 +1,12 @@
 // Telegram Bot API helpers
 
-import { SigilClient } from './sigil.js'
-import { LlmClient } from './llm.js'
-import { ChatStore, type ContentPart } from './chat-store.js'
-import { Soul } from './soul.js'
-import { Memory } from './memory.js'
-import { storeImageForVL } from './utils.js'
-import type { Env } from './index.js'
+import { SigilClient } from '@uncaged/core/sigil'
+import { LlmClient } from '@uncaged/core/llm'
+import { ChatStore, type ContentPart } from '@uncaged/core/chat-store'
+import { Soul } from '@uncaged/core/soul'
+import { Memory } from '@uncaged/core/memory'
+import { storeImageForVL } from '@uncaged/core/utils'
+import type { DoudouEnv } from './index.js'
 
 interface TelegramUpdate {
   message?: {
@@ -27,7 +27,7 @@ interface TelegramUpdate {
 
 export async function handleTelegramWebhook(
   request: Request,
-  env: Env,
+  env: DoudouEnv,
   sigil: SigilClient,
   llm: LlmClient,
   chatStore: ChatStore,
