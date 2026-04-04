@@ -1,0 +1,14 @@
+name = "uncaged-health"
+main = "src/index.ts"
+compatibility_date = "2026-04-03"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+UNCAGED_URL = "https://uncaged.shazhou.workers.dev"
+OC_STATUS_URL = "https://oc-status.shazhou.workers.dev"
+
+[[kv_namespaces]]
+binding = "HEALTH_KV"
+id = "placeholder-replace-before-deploy"
