@@ -6,7 +6,7 @@ compatibility_date = "2026-04-03"
 crons = ["*/5 * * * *"]
 
 [vars]
-UNCAGED_URL = "https://uncaged.shazhou.workers.dev"
+UNCAGED_URL = "https://doudou.shazhou.work"
 OC_STATUS_URL = "https://oc-status.shazhou.workers.dev"
 
 # Secrets (set via `wrangler secret put`):

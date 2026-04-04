@@ -19,5 +19,9 @@ binding = "MEMORY_DB"
 database_name = "uncaged-memory"
 database_id = "24bc6992-57b0-4703-807d-6be0a6adac46"
 
+[[routes]]
+pattern = "doudou.shazhou.work/*"
+zone_id = "dcfbc03ffea31a6afe08b657022963f8"
+
 [ai]
 binding = "AI"
