@@ -96,6 +96,9 @@ export async function handleTelegramWebhook(
 
   // ─── Normal message ───
 
+  // Show typing indicator + keep it alive during processing
+  const typingInterval = startTypingIndicator(env.TELEGRAM_BOT_TOKEN, chatId)
+
   try {
     // Store user message embedding (async, don't block)
     const storeUserPromise = memory.store(userText, 'user', chatId)
@@ -113,6 +116,9 @@ export async function handleTelegramWebhook(
     // Run agentic loop
     const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory)
 
+    // Stop typing
+    typingInterval.stop()
+
     // Store assistant reply embedding (async)
     const storeAssistantPromise = memory.store(reply, 'assistant', chatId)
 
@@ -125,12 +131,42 @@ export async function handleTelegramWebhook(
     // Await embedding storage (best effort)
     await Promise.allSettled([storeUserPromise, storeAssistantPromise])
   } catch (e: any) {
+    typingInterval.stop()
     console.error('[uncaged] error:', e)
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
       `Oops, something went wrong. Try again?`)
   }
 
   return new Response('ok')
+}
+
+async function sendChatAction(token: string, chatId: number, action: string): Promise<void> {
+  await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, action }),
+  })
+}
+
+/**
+ * Send typing indicator immediately and refresh every 4s (TG typing expires after 5s).
+ * Returns a handle with stop() to cancel.
+ */
+function startTypingIndicator(token: string, chatId: number): { stop: () => void } {
+  let stopped = false
+  // Fire immediately
+  sendChatAction(token, chatId, 'typing')
+  // Refresh every 4 seconds
+  const id = setInterval(() => {
+    if (stopped) return
+    sendChatAction(token, chatId, 'typing')
+  }, 4000)
+  return {
+    stop() {
+      stopped = true
+      clearInterval(id)
+    },
+  }
 }
 
 async function sendTelegram(token: string, chatId: number, text: string): Promise<void> {
