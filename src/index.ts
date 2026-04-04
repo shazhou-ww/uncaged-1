@@ -4,7 +4,7 @@ import { LlmClient } from './llm.js'
 import { ChatStore, type ContentPart } from './chat-store.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
-import { arrayBufferToBase64 } from './utils.js'
+import { uploadImageToDashScope } from './utils.js'
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string
@@ -175,19 +175,24 @@ export default {
         if (body.image_url) {
           let finalImageUrl = body.image_url
           
-          // If not already a data URI, download and convert to base64
-          if (!finalImageUrl.startsWith('data:')) {
+          // If not already a data URI or file:// reference, download and upload to DashScope
+          if (!finalImageUrl.startsWith('data:') && !finalImageUrl.startsWith('file://')) {
             try {
               const imgRes = await fetch(finalImageUrl)
               if (imgRes.ok) {
-                const buf = await imgRes.arrayBuffer()
-                const base64 = arrayBufferToBase64(buf)
+                const arrayBuffer = await imgRes.arrayBuffer()
                 const contentType = imgRes.headers.get('content-type') || 'image/jpeg'
-                finalImageUrl = `data:${contentType};base64,${base64}`
-                console.log(`[Multimodal] /chat API: Converted external URL to base64 data URI (${buf.byteLength} bytes, ${contentType})`)
+                
+                // Extract filename from URL or use generic name
+                const urlPath = new URL(finalImageUrl).pathname
+                const filename = urlPath.split('/').pop() || `image.${contentType.split('/')[1] || 'jpg'}`
+                
+                // Upload to DashScope (with base64 fallback)
+                finalImageUrl = await uploadImageToDashScope(arrayBuffer, filename, contentType, env.DASHSCOPE_API_KEY)
+                console.log(`[Multimodal] /chat API: Processed external image URL`)
               }
             } catch (e) {
-              console.error('[Multimodal] Failed to download image for /chat:', e)
+              console.error('[Multimodal] Failed to process image for /chat:', e)
             }
           }
           
