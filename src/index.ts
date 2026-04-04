@@ -17,10 +17,11 @@ export interface Env {
   CHAT_KV: KVNamespace
   MEMORY_INDEX: VectorizeIndex
   AI: any
+  DEBUG_ENABLED?: string
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
     const instanceId = env.INSTANCE_ID || 'default'
 
@@ -46,7 +47,7 @@ export default {
       const chatStore = new ChatStore(env.CHAT_KV)
       const soul = new Soul(env.CHAT_KV, instanceId)
       const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
-      return handleTelegramWebhook(request, env, sigil, llm, chatStore, soul, memory)
+      return handleTelegramWebhook(request, env, sigil, llm, chatStore, soul, memory, ctx)
     }
 
     // Soul management API
@@ -177,7 +178,8 @@ export default {
           headers: { 'Content-Type': 'application/json' },
         })
       } catch (e: any) {
-        return new Response(JSON.stringify({ error: e.message }), {
+        console.error('[chat] error:', e)
+        return new Response(JSON.stringify({ error: 'Internal error' }), {
           status: 500, headers: { 'Content-Type': 'application/json' },
         })
       }
@@ -201,6 +203,11 @@ export default {
 
     // Debug: test vectorize round-trip
     if (url.pathname === '/debug/vectorize' && request.method === 'POST') {
+      if (env.DEBUG_ENABLED !== 'true') {
+        return new Response(JSON.stringify({ error: 'Debug disabled' }), {
+          status: 403, headers: { 'Content-Type': 'application/json' },
+        })
+      }
       const auth = request.headers.get('Authorization')
       if (auth !== `Bearer ${env.SIGIL_DEPLOY_TOKEN}`) {
         return new Response('Unauthorized', { status: 401 })
@@ -242,6 +249,11 @@ export default {
           filter: { instance_id: instanceId },
         })
         
+        // Clean up test vector
+        try {
+          await env.MEMORY_INDEX.deleteByIds([id])
+        } catch {}
+        
         return new Response(JSON.stringify({
           ok: true,
           storedId: id,
@@ -253,7 +265,7 @@ export default {
           headers: { 'Content-Type': 'application/json' },
         })
       } catch (e: any) {
-        return new Response(JSON.stringify({ error: e.message, stack: e.stack }), {
+        return new Response(JSON.stringify({ error: e.message }), {
           status: 500, headers: { 'Content-Type': 'application/json' },
         })
       }

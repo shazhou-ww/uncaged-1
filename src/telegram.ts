@@ -24,6 +24,7 @@ export async function handleTelegramWebhook(
   chatStore: ChatStore,
   soul: Soul,
   memory: Memory,
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const update: TelegramUpdate = await request.json()
   const msg = update.message
@@ -100,7 +101,7 @@ export async function handleTelegramWebhook(
   // ─── Normal message ───
 
   // Show typing indicator + keep it alive during processing
-  const typingInterval = startTypingIndicator(env.TELEGRAM_BOT_TOKEN, chatId)
+  const typingInterval = startTypingIndicator(env.TELEGRAM_BOT_TOKEN, chatId, ctx)
 
   try {
     // Store user message embedding (async, don't block)
@@ -156,7 +157,7 @@ async function sendChatAction(token: string, chatId: number, action: string): Pr
  * CF Workers don't support setInterval, so we use a polling loop with waitUntil.
  * Typing expires after 5s in Telegram, we refresh every 4s.
  */
-function startTypingIndicator(token: string, chatId: number): { stop: () => void } {
+function startTypingIndicator(token: string, chatId: number, ctx?: ExecutionContext): { stop: () => void } {
   let stopped = false
   let lastSent = 0
 
@@ -172,13 +173,17 @@ function startTypingIndicator(token: string, chatId: number): { stop: () => void
   send()
 
   // Refresh via a self-scheduling loop (works in CF Workers via microtasks)
-  const loop = async () => {
+  const loopPromise = (async () => {
     while (!stopped) {
       await new Promise(r => setTimeout(r, 4000))
       send()
     }
+  })()
+
+  // Use waitUntil to keep the loop alive
+  if (ctx) {
+    ctx.waitUntil(loopPromise)
   }
-  loop()
 
   return {
     stop() { stopped = true },
