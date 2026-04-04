@@ -228,6 +228,29 @@ export class LlmClient {
       messages[0].content = systemPrompt
     }
 
+    // Auto-inject relevant memories based on the latest user message
+    const lastUserMsg = [...messages].reverse().find(m => m.role === 'user')
+    if (lastUserMsg?.content) {
+      try {
+        const memories = await memory.search(lastUserMsg.content, 5, 0)
+        if (memories.length > 0) {
+          const memoryContext = memories.map(m => {
+            const time = m.timestamp ? new Date(m.timestamp).toISOString().slice(0, 16) : '?'
+            return `[${time}] ${m.role}: ${m.text}`
+          }).join('\n')
+          // Inject as a system message right after the main system prompt
+          const memoryMsg: ChatMessage = {
+            role: 'system',
+            content: `## Relevant memories (auto-retrieved)\nThese are past conversations that may be relevant. Use them to provide context-aware responses.\n\n${memoryContext}`,
+          }
+          // Insert after the first system message
+          messages.splice(1, 0, memoryMsg)
+        }
+      } catch {
+        // Memory search failure is non-fatal
+      }
+    }
+
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       // Derive dynamic tools from chat history
       const dynamicCaps = extractCapabilitiesFromHistory(messages)

@@ -161,6 +161,66 @@ export default {
       })
     }
 
+    // Debug: test vectorize round-trip
+    if (url.pathname === '/debug/vectorize' && request.method === 'POST') {
+      const auth = request.headers.get('Authorization')
+      if (auth !== `Bearer ${env.SIGIL_DEPLOY_TOKEN}`) {
+        return new Response('Unauthorized', { status: 401 })
+      }
+      try {
+        const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
+        
+        // 1. Generate embedding
+        const testText = 'debug vectorize test ' + Date.now()
+        const embedding = await env.AI.run('@cf/baai/bge-m3', { text: [testText] })
+        const vector = embedding.data[0]
+        
+        // 2. Upsert directly
+        const id = `debug:${Date.now()}`
+        const upsertResult = await env.MEMORY_INDEX.upsert([{
+          id,
+          values: vector,
+          metadata: {
+            text: testText,
+            role: 'user',
+            timestamp: Date.now(),
+            instance_id: instanceId,
+          },
+        }])
+        
+        // 3. Wait
+        await new Promise(r => setTimeout(r, 3000))
+        
+        // 4. Query WITHOUT filter
+        const noFilterResults = await env.MEMORY_INDEX.query(vector, {
+          topK: 10,
+          returnMetadata: 'all',
+        })
+        
+        // 5. Query WITH filter
+        const withFilterResults = await env.MEMORY_INDEX.query(vector, {
+          topK: 10,
+          returnMetadata: 'all',
+          filter: { instance_id: instanceId },
+        })
+        
+        return new Response(JSON.stringify({
+          ok: true,
+          storedId: id,
+          vectorDims: vector.length,
+          upsertResult,
+          noFilter: { count: noFilterResults.count, matches: noFilterResults.matches?.length || 0 },
+          withFilter: { count: withFilterResults.count, matches: withFilterResults.matches?.length || 0 },
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message, stack: e.stack }), {
+          status: 500, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
     return new Response('Not found', { status: 404 })
   },
 }
