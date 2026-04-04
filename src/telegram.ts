@@ -149,23 +149,36 @@ async function sendChatAction(token: string, chatId: number, action: string): Pr
 }
 
 /**
- * Send typing indicator immediately and refresh every 4s (TG typing expires after 5s).
- * Returns a handle with stop() to cancel.
+ * Send typing indicator with throttled refresh.
+ * CF Workers don't support setInterval, so we use a polling loop with waitUntil.
+ * Typing expires after 5s in Telegram, we refresh every 4s.
  */
 function startTypingIndicator(token: string, chatId: number): { stop: () => void } {
   let stopped = false
+  let lastSent = 0
+
+  const send = () => {
+    const now = Date.now()
+    if (stopped || now - lastSent < 4000) return
+    lastSent = now
+    // Fire and forget
+    sendChatAction(token, chatId, 'typing').catch(() => {})
+  }
+
   // Fire immediately
-  sendChatAction(token, chatId, 'typing')
-  // Refresh every 4 seconds
-  const id = setInterval(() => {
-    if (stopped) return
-    sendChatAction(token, chatId, 'typing')
-  }, 4000)
+  send()
+
+  // Refresh via a self-scheduling loop (works in CF Workers via microtasks)
+  const loop = async () => {
+    while (!stopped) {
+      await new Promise(r => setTimeout(r, 4000))
+      send()
+    }
+  }
+  loop()
+
   return {
-    stop() {
-      stopped = true
-      clearInterval(id)
-    },
+    stop() { stopped = true },
   }
 }
 
