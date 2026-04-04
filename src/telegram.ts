@@ -115,87 +115,97 @@ export async function handleTelegramWebhook(
 
   // ─── Normal message (text or multimodal) ───
 
-  // Show typing indicator + keep it alive during processing
-  const typingInterval = startTypingIndicator(env.TELEGRAM_BOT_TOKEN, chatId, ctx)
+  // Return early to avoid Telegram webhook timeout, process in background
+  const processPromise = (async () => {
+    // Show typing indicator + keep it alive during processing
+    const typingInterval = startTypingIndicator(env.TELEGRAM_BOT_TOKEN, chatId, ctx)
 
-  try {
-    // Get image URL if photo is present
-    let imageUrl: string | undefined
-    if (hasPhoto && msg.photo) {
-      // Telegram photo array: last element is highest resolution
-      const photo = msg.photo[msg.photo.length - 1]
-      const fileId = photo.file_id
-      
-      console.log('[Multimodal] Photo detected, file_id:', fileId)
-      
-      // 1. Get file path from Telegram
-      const fileRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`)
-      const fileData = await fileRes.json() as any
-      
-      if (fileData.ok && fileData.result.file_path) {
-        const filePath = fileData.result.file_path
-        const telegramUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`
+    try {
+      // Get image URL if photo is present
+      let imageUrl: string | undefined
+      if (hasPhoto && msg.photo) {
+        // Telegram photo array: last element is highest resolution
+        const photo = msg.photo[msg.photo.length - 1]
+        const fileId = photo.file_id
         
-        // 2. Download image to memory
-        const imgResponse = await fetch(telegramUrl)
-        if (imgResponse.ok) {
-          const arrayBuffer = await imgResponse.arrayBuffer()
+        console.log('[Multimodal] Photo detected, file_id:', fileId)
+        
+        // 1. Get file path from Telegram
+        const fileRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`)
+        const fileData = await fileRes.json() as any
+        
+        if (fileData.ok && fileData.result.file_path) {
+          const filePath = fileData.result.file_path
+          const telegramUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`
           
-          // Detect MIME type from file extension
-          const ext = filePath.split('.').pop()?.toLowerCase() || 'jpg'
-          const mimeType = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg'
-          const filename = `tg-${fileId.slice(0,8)}.${ext}`
-          
-          // 3. Upload to DashScope Files API (with base64 fallback)
-          imageUrl = await uploadImageToDashScope(arrayBuffer, filename, mimeType, env.DASHSCOPE_API_KEY)
+          // 2. Download image to memory
+          const imgResponse = await fetch(telegramUrl)
+          if (imgResponse.ok) {
+            const arrayBuffer = await imgResponse.arrayBuffer()
+            
+            // Detect MIME type from file extension
+            const ext = filePath.split('.').pop()?.toLowerCase() || 'jpg'
+            const mimeType = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg'
+            const filename = `tg-${fileId.slice(0,8)}.${ext}`
+            
+            // 3. Upload to DashScope Files API (with base64 fallback)
+            imageUrl = await uploadImageToDashScope(arrayBuffer, filename, mimeType, env.DASHSCOPE_API_KEY)
+          }
         }
       }
+
+      // Store user message embedding (text only, don't store image URLs)
+      const storeUserPromise = memory.store(userText || '[Image]', 'user', memorySessionId)
+
+      // Load chat history
+      let messages = await chatStore.load(chatId)
+
+      // Compress if needed
+      const { messages: compressed } = chatStore.maybeCompress(messages)
+      messages = compressed
+
+      // Add user message (multimodal or text-only)
+      if (imageUrl) {
+        // Multimodal message
+        const content: ContentPart[] = []
+        if (userText) content.push({ type: 'text', text: userText })
+        content.push({ type: 'image_url', image_url: { url: imageUrl } })
+        messages.push({ role: 'user', content })
+        console.log('[Multimodal] Added multimodal message with', content.length, 'parts')
+      } else {
+        messages.push({ role: 'user', content: userText })
+      }
+
+      // Run agentic loop
+      const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory, memorySessionId)
+
+      // Stop typing
+      typingInterval.stop()
+
+      // Store assistant reply embedding (async)
+      const storeAssistantPromise = memory.store(reply, 'assistant', memorySessionId)
+
+      // Save chat history
+      await chatStore.save(chatId, updatedMessages)
+
+      // Reply
+      await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, reply)
+
+      // Await embedding storage (best effort)
+      await Promise.allSettled([storeUserPromise, storeAssistantPromise])
+    } catch (e: any) {
+      typingInterval.stop()
+      console.error('[uncaged] error:', e)
+      await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
+        `Oops, something went wrong. Try again?`)
     }
+  })()
 
-    // Store user message embedding (text only, don't store image URLs)
-    const storeUserPromise = memory.store(userText || '[Image]', 'user', memorySessionId)
-
-    // Load chat history
-    let messages = await chatStore.load(chatId)
-
-    // Compress if needed
-    const { messages: compressed } = chatStore.maybeCompress(messages)
-    messages = compressed
-
-    // Add user message (multimodal or text-only)
-    if (imageUrl) {
-      // Multimodal message
-      const content: ContentPart[] = []
-      if (userText) content.push({ type: 'text', text: userText })
-      content.push({ type: 'image_url', image_url: { url: imageUrl } })
-      messages.push({ role: 'user', content })
-      console.log('[Multimodal] Added multimodal message with', content.length, 'parts')
-    } else {
-      messages.push({ role: 'user', content: userText })
-    }
-
-    // Run agentic loop
-    const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory, memorySessionId)
-
-    // Stop typing
-    typingInterval.stop()
-
-    // Store assistant reply embedding (async)
-    const storeAssistantPromise = memory.store(reply, 'assistant', memorySessionId)
-
-    // Save chat history
-    await chatStore.save(chatId, updatedMessages)
-
-    // Reply
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, reply)
-
-    // Await embedding storage (best effort)
-    await Promise.allSettled([storeUserPromise, storeAssistantPromise])
-  } catch (e: any) {
-    typingInterval.stop()
-    console.error('[uncaged] error:', e)
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
-      `Oops, something went wrong. Try again?`)
+  // Process in background — don't block Telegram webhook response
+  if (ctx) {
+    ctx.waitUntil(processPromise)
+  } else {
+    await processPromise
   }
 
   return new Response('ok')
