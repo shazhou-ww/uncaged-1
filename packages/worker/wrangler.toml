@@ -4,16 +4,18 @@ compatibility_date = "2026-04-03"
 
 [vars]
 SIGIL_URL = "https://sigil.shazhou.work"
-INSTANCE_ID = "doudou"
 
+# Unified KV namespace (shared by all instances, isolated by instanceId prefix)
 [[kv_namespaces]]
 binding = "CHAT_KV"
 id = "84a3ac3b64c846bd9e6c2b8632dc2499"
 
+# Shared Vectorize index (filtered by instance_id)
 [[vectorize]]
 binding = "MEMORY_INDEX"
 index_name = "uncaged-memory-v2"
 
+# Shared D1 databases
 [[d1_databases]]
 binding = "MEMORY_DB"
 database_name = "uncaged-memory"
@@ -24,6 +26,7 @@ binding = "BATON_DB"
 database_name = "baton-store"
 database_id = "6729fa63-c1e3-45ca-8896-689c21eabf4f"
 
+# Baton task queue
 [[queues.producers]]
 queue = "baton-events"
 binding = "BATON_QUEUE"
@@ -33,9 +36,31 @@ queue = "baton-events"
 max_batch_size = 5
 max_retries = 3
 
+# Route: doudou instance (Telegram bot)
 [[routes]]
 pattern = "doudou.shazhou.work/*"
 zone_id = "dcfbc03ffea31a6afe08b657022963f8"
 
+# Route: xiaomai instance (Web chat)
+[[routes]]
+pattern = "xiaomai.shazhou.work/*"
+zone_id = "dcfbc03ffea31a6afe08b657022963f8"
+
 [ai]
 binding = "AI"
+
+# Secrets (set via `wrangler secret put`):
+# Shared:
+#   - DASHSCOPE_API_KEY
+#   - SIGIL_DEPLOY_TOKEN
+#   - LLM_MODEL (optional)
+#   - LLM_BASE_URL (optional)
+#   - A2A_TOKEN (optional)
+#   - DEBUG_ENABLED (optional)
+# Telegram channel:
+#   - TELEGRAM_BOT_TOKEN
+#   - ALLOWED_CHAT_IDS
+# Web channel:
+#   - GOOGLE_CLIENT_ID
+#   - GOOGLE_CLIENT_SECRET
+#   - SESSION_SECRET

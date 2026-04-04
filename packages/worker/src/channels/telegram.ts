@@ -1,12 +1,10 @@
-// Telegram Bot API helpers
+// Telegram channel adapter
+// Handles /webhook route for Telegram Bot API
 
-import { SigilClient } from '@uncaged/core/sigil'
-import { LlmClient } from '@uncaged/core/llm'
-import { ChatStore, type ContentPart } from '@uncaged/core/chat-store'
-import { Soul } from '@uncaged/core/soul'
-import { Memory } from '@uncaged/core/memory'
+import { type ContentPart } from '@uncaged/core/chat-store'
 import { storeImageForVL } from '@uncaged/core/utils'
-import type { DoudouEnv } from './index.js'
+import type { WorkerEnv } from '../index.js'
+import type { CoreClients } from '../router.js'
 
 interface TelegramUpdate {
   message?: {
@@ -25,16 +23,16 @@ interface TelegramUpdate {
   }
 }
 
-export async function handleTelegramWebhook(
+export async function handleTelegramRoutes(
   request: Request,
-  env: DoudouEnv,
-  sigil: SigilClient,
-  llm: LlmClient,
-  chatStore: ChatStore,
-  soul: Soul,
-  memory: Memory,
+  env: WorkerEnv,
+  clients: CoreClients,
+  instanceId: string,
   ctx?: ExecutionContext,
 ): Promise<Response> {
+  const { sigil, llm, chatStore, soul, memory } = clients
+  const botToken = env.TELEGRAM_BOT_TOKEN!
+
   const update: TelegramUpdate = await request.json()
   const msg = update.message
 
@@ -44,32 +42,29 @@ export async function handleTelegramWebhook(
 
   if (!hasText && !hasPhoto) return new Response('ok')
 
-  const chatId = msg.chat.id
-  let userText = (msg.text || caption).trim()
-  const userName = msg.from?.first_name || 'there'
-  const userTag = msg.from?.username || msg.from?.first_name || String(chatId)
-  // Memory session tag: identifies who this conversation is with
+  const chatId = msg!.chat.id
+  const userText = (msg!.text || caption).trim()
+  const userName = msg!.from?.first_name || 'there'
+  const userTag = msg!.from?.username || msg!.from?.first_name || String(chatId)
   const memorySessionId = `telegram:${userTag}`
 
-  // ─── Chat ID whitelist check ───
+  // ─── Chat ID whitelist ───
   const allowedChats = env.ALLOWED_CHAT_IDS
     ? new Set(env.ALLOWED_CHAT_IDS.split(',').map(Number))
-    : null  // null = 不限制（开发模式）
+    : null
 
   if (allowedChats && !allowedChats.has(chatId)) {
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '⛔ Unauthorized')
+    await sendTelegram(botToken, chatId, '⛔ Unauthorized')
     return new Response('ok')
   }
 
   // ─── Commands ───
-
   if (userText === '/start') {
     await chatStore.clear(chatId)
     const soulText = await soul.getSoul()
-    // Extract name from soul if possible
     const nameMatch = soulText.match(/You are (.+?)[,\n]/)
     const botName = nameMatch ? nameMatch[1] : 'Uncaged 🔓'
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
+    await sendTelegram(botToken, chatId,
       `Hey ${userName}! I'm ${botName}\n\n` +
       `I can discover and create capabilities on the fly. Just tell me what you need!\n\n` +
       `Type /help to see what I can do.`)
@@ -77,7 +72,7 @@ export async function handleTelegramWebhook(
   }
 
   if (userText === '/help') {
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
+    await sendTelegram(botToken, chatId,
       `🔓 Commands:\n\n` +
       `/start - Reset conversation\n` +
       `/clear - Clear chat history (memory retained)\n` +
@@ -95,113 +90,81 @@ export async function handleTelegramWebhook(
 
   if (userText === '/clear') {
     await chatStore.clear(chatId)
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
-      '🧹 Chat cleared! Long-term memory is still intact.')
+    await sendTelegram(botToken, chatId, '🧹 Chat cleared! Long-term memory is still intact.')
     return new Response('ok')
   }
 
   if (userText === '/soul') {
     const soulText = await soul.getSoul()
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, `👻 My soul:\n\n${soulText}`)
+    await sendTelegram(botToken, chatId, `👻 My soul:\n\n${soulText}`)
     return new Response('ok')
   }
 
-  // Ignore other / commands gracefully
   if (userText.startsWith('/') && !hasPhoto) {
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
-      `Unknown command. Type /help to see available commands.`)
+    await sendTelegram(botToken, chatId, `Unknown command. Type /help to see available commands.`)
     return new Response('ok')
   }
 
-  // ─── Normal message (text or multimodal) ───
+  // ─── Normal message ───
+  const publicBaseUrl = `https://${new URL(request.url).hostname}`
 
-  // Return early to avoid Telegram webhook timeout, process in background
   const processPromise = (async () => {
-    // Show typing indicator + keep it alive during processing
-    const typingInterval = startTypingIndicator(env.TELEGRAM_BOT_TOKEN, chatId, ctx)
+    const typingInterval = startTypingIndicator(botToken, chatId, ctx)
 
     try {
-      // Get image URL if photo is present
       let imageUrl: string | undefined
-      if (hasPhoto && msg.photo) {
-        // Telegram photo array: last element is highest resolution
-        const photo = msg.photo[msg.photo.length - 1]
-        const fileId = photo.file_id
-        
-        console.log('[Multimodal] Photo detected, file_id:', fileId)
-        
-        // 1. Get file path from Telegram
-        const fileRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`)
+      if (hasPhoto && msg!.photo) {
+        const photo = msg!.photo[msg!.photo.length - 1]
+        const fileRes = await fetch(`https://api.telegram.org/bot${botToken}/getFile?file_id=${photo.file_id}`)
         const fileData = await fileRes.json() as any
-        
+
         if (fileData.ok && fileData.result.file_path) {
           const filePath = fileData.result.file_path
-          const telegramUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${filePath}`
-          
-          // 2. Download image to memory
-          const imgResponse = await fetch(telegramUrl)
+          const imgResponse = await fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`)
           if (imgResponse.ok) {
             const arrayBuffer = await imgResponse.arrayBuffer()
-            
-            // Detect MIME type from file extension
             const ext = filePath.split('.').pop()?.toLowerCase() || 'jpg'
             const mimeType = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg'
-            const filename = `tg-${fileId.slice(0,8)}.${ext}`
-            
-            // 3. Upload to DashScope Files API (with base64 fallback)
-            imageUrl = await storeImageForVL(arrayBuffer, mimeType, env.CHAT_KV, 'https://doudou.shazhou.work')
+            imageUrl = await storeImageForVL(arrayBuffer, mimeType, env.CHAT_KV, publicBaseUrl)
           }
         }
       }
 
-      // Store user message embedding (text only, don't store image URLs)
       const storeUserPromise = memory.store(userText || '[Image]', 'user', memorySessionId)
 
-      // Load chat history
       let messages = await chatStore.load(chatId)
-
-      // Compress if needed
       const { messages: compressed } = chatStore.maybeCompress(messages)
       messages = compressed
 
-      // Add user message (multimodal or text-only)
       if (imageUrl) {
-        // Multimodal message
         const content: ContentPart[] = []
         if (userText) content.push({ type: 'text', text: userText })
         content.push({ type: 'image_url', image_url: { url: imageUrl } })
         messages.push({ role: 'user', content })
-        console.log('[Multimodal] Added multimodal message with', content.length, 'parts')
       } else {
         messages.push({ role: 'user', content: userText })
       }
 
-      // Run agentic loop
       const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory, memorySessionId)
 
-      // Stop typing
       typingInterval.stop()
 
-      // Store assistant reply embedding (async)
       const storeAssistantPromise = memory.store(reply, 'assistant', memorySessionId)
-
-      // Save chat history
       await chatStore.save(chatId, updatedMessages)
-
-      // Reply
-      await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, reply)
-
-      // Await embedding storage (best effort)
+      await sendTelegram(botToken, chatId, reply)
       await Promise.allSettled([storeUserPromise, storeAssistantPromise])
     } catch (e: any) {
       typingInterval.stop()
       console.error('[uncaged] error:', e)
-      await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
-        `Oops, something went wrong. Try again?`)
+      try {
+        await env.CHAT_KV.put('debug:last_error', JSON.stringify({
+          error: e.message, stack: e.stack, time: Date.now(),
+        }), { expirationTtl: 3600 })
+      } catch {}
+      await sendTelegram(botToken, chatId, `Oops, something went wrong. Try again?`)
     }
   })()
 
-  // Process in background — don't block Telegram webhook response
   if (ctx) {
     ctx.waitUntil(processPromise)
   } else {
@@ -211,6 +174,8 @@ export async function handleTelegramWebhook(
   return new Response('ok')
 }
 
+// ─── Telegram API helpers ───
+
 async function sendChatAction(token: string, chatId: number, action: string): Promise<void> {
   await fetch(`https://api.telegram.org/bot${token}/sendChatAction`, {
     method: 'POST',
@@ -219,11 +184,6 @@ async function sendChatAction(token: string, chatId: number, action: string): Pr
   })
 }
 
-/**
- * Send typing indicator with throttled refresh.
- * CF Workers don't support setInterval, so we use a polling loop with waitUntil.
- * Typing expires after 5s in Telegram, we refresh every 4s.
- */
 function startTypingIndicator(token: string, chatId: number, ctx?: ExecutionContext): { stop: () => void } {
   let stopped = false
   let lastSent = 0
@@ -232,14 +192,11 @@ function startTypingIndicator(token: string, chatId: number, ctx?: ExecutionCont
     const now = Date.now()
     if (stopped || now - lastSent < 4000) return
     lastSent = now
-    // Fire and forget
     sendChatAction(token, chatId, 'typing').catch(() => {})
   }
 
-  // Fire immediately
   send()
 
-  // Refresh via a self-scheduling loop (works in CF Workers via microtasks)
   const loopPromise = (async () => {
     while (!stopped) {
       await new Promise(r => setTimeout(r, 4000))
@@ -247,35 +204,24 @@ function startTypingIndicator(token: string, chatId: number, ctx?: ExecutionCont
     }
   })()
 
-  // Use waitUntil to keep the loop alive
   if (ctx) {
     ctx.waitUntil(loopPromise)
   }
 
-  return {
-    stop() { stopped = true },
-  }
+  return { stop() { stopped = true } }
 }
 
 export async function sendTelegram(token: string, chatId: number, text: string): Promise<void> {
-  // Try Markdown first, fall back to plain text
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: 'Markdown',
-    }),
+    body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown' }),
   })
   if (!res.ok) {
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-      }),
+      body: JSON.stringify({ chat_id: chatId, text }),
     })
   }
 }

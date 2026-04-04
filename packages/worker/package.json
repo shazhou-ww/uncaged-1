@@ -1,7 +1,7 @@
 {
-  "name": "@uncaged/doudou",
+  "name": "@uncaged/worker",
   "version": "0.1.0",
-  "description": "Doudou - Telegram Bot instance of Uncaged",
+  "description": "Unified Uncaged Worker — one codebase, N agent instances",
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {

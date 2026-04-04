@@ -9,7 +9,7 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
-    "deploy:doudou": "npm run deploy -w packages/doudou"
+    "deploy": "npm run deploy -w packages/worker"
   },
   "author": "小橘 <xiaoju@shazhou.work>",
   "license": "MIT",
