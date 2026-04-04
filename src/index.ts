@@ -118,6 +118,44 @@ export default {
       const soul = new Soul(env.CHAT_KV, instanceId)
       const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)
 
+      const userMessage = body.message.trim()
+
+      // Handle commands
+      if (userMessage === '/clear') {
+        await chatStore.clear(chatId)
+        return new Response(JSON.stringify({ reply: '🧹 Chat cleared! Long-term memory is still intact.', chat_id: chatId }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      if (userMessage === '/start') {
+        await chatStore.clear(chatId)
+        const soulObj = new Soul(env.CHAT_KV, instanceId)
+        const soulText = await soulObj.getSoul()
+        const nameMatch = soulText.match(/You are (.+?)[,\n]/)
+        const botName = nameMatch ? nameMatch[1] : 'Uncaged 🔓'
+        return new Response(JSON.stringify({ reply: `Hey! I'm ${botName}. Type /help to see what I can do.`, chat_id: chatId }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      if (userMessage === '/help') {
+        return new Response(JSON.stringify({ 
+          reply: '🔓 Commands:\n/start - Reset conversation\n/clear - Clear chat history\n/soul - Show personality\n/help - This message',
+          chat_id: chatId 
+        }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      if (userMessage === '/soul') {
+        const soulObj = new Soul(env.CHAT_KV, instanceId)
+        const soulText = await soulObj.getSoul()
+        return new Response(JSON.stringify({ reply: `👻 My soul:\n\n${soulText}`, chat_id: chatId }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
       try {
         // Store user message
         const storePromise = memory.store(body.message, 'user', chatId)
