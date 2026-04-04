@@ -33,6 +33,16 @@ export async function handleTelegramWebhook(
   const userText = msg.text.trim()
   const userName = msg.from?.first_name || 'there'
 
+  // ─── Chat ID whitelist check ───
+  const allowedChats = env.ALLOWED_CHAT_IDS
+    ? new Set(env.ALLOWED_CHAT_IDS.split(',').map(Number))
+    : null  // null = 不限制（开发模式）
+
+  if (allowedChats && !allowedChats.has(chatId)) {
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '⛔ Unauthorized')
+    return new Response('ok')
+  }
+
   // ─── Commands ───
 
   if (userText === '/start') {

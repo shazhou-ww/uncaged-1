@@ -88,13 +88,12 @@ export class Memory {
    * Useful for "what did we talk about yesterday?"
    */
   async recall(startTime: number, endTime: number, limit = 20): Promise<MemoryEntry[]> {
-    // Use a neutral embedding for time-range queries
-    // Filter by timestamp metadata
-    const neutralText = 'conversation context'
+    // Use a neutral embedding — but fetch more than needed and sort by time
+    const neutralText = 'conversation message recall'
     const embedding = await this.embed(neutralText)
 
     const results = await this.vectorIndex.query(embedding, {
-      topK: limit,
+      topK: Math.min(limit * 5, 100),  // fetch more to compensate for semantic bias
       returnMetadata: 'all',
       filter: {
         instance_id: this.instanceId,
@@ -104,7 +103,8 @@ export class Memory {
 
     if (!results.matches) return []
 
-    const entries: MemoryEntry[] = results.matches
+    // Sort by timestamp (not by semantic similarity)
+    return results.matches
       .map(m => ({
         id: m.id,
         text: (m.metadata?.text as string) || '',
@@ -115,24 +115,21 @@ export class Memory {
         score: m.score,
       }))
       .sort((a, b) => a.timestamp - b.timestamp)
-
-    return entries
+      .slice(0, limit)
   }
 
   /**
    * Get count of stored memories for this instance.
    */
   async count(): Promise<number> {
-    // Vectorize doesn't have a direct count API.
-    // Use a broad query with high topK as approximation.
     try {
       const embedding = await this.embed('memory count')
       const results = await this.vectorIndex.query(embedding, {
-        topK: 1,
+        topK: 100,
         returnMetadata: 'none',
         filter: { instance_id: this.instanceId },
       })
-      return results.count || 0
+      return results.matches?.length || 0
     } catch {
       return 0
     }

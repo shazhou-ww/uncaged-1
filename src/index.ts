@@ -11,6 +11,7 @@ export interface Env {
   SIGIL_DEPLOY_TOKEN: string
   SIGIL_URL: string
   INSTANCE_ID: string
+  ALLOWED_CHAT_IDS: string
   CHAT_KV: KVNamespace
   MEMORY_INDEX: VectorizeIndex
   AI: any

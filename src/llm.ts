@@ -302,7 +302,18 @@ export class LlmClient {
     // ── Sigil tools ──
     if (name === 'sigil_query') {
       const result = await sigil.query(args.q, args.limit || 5)
-      return JSON.stringify(result)
+      // Enrich with schema from inspect
+      const enriched = await Promise.all(
+        result.items.map(async (item) => {
+          try {
+            const detail = await sigil.inspect(item.capability)
+            return { ...item, schema: detail?.schema }
+          } catch {
+            return item
+          }
+        })
+      )
+      return JSON.stringify({ ...result, items: enriched })
     }
 
     if (name === 'sigil_deploy') {

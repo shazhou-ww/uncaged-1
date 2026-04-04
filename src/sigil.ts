@@ -15,6 +15,7 @@ export interface QueryResult {
     description?: string
     tags?: string[]
     type: string
+    schema?: any
   }>
   total: number
 }
