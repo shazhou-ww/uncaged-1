@@ -257,7 +257,7 @@ function startTypingIndicator(token: string, chatId: number, ctx?: ExecutionCont
   }
 }
 
-async function sendTelegram(token: string, chatId: number, text: string): Promise<void> {
+export async function sendTelegram(token: string, chatId: number, text: string): Promise<void> {
   // Try Markdown first, fall back to plain text
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',

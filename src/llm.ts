@@ -15,6 +15,8 @@ import {
 } from './pipeline.js'
 import { createCapabilityTool, handleCreateCapability, type CreateCapabilityArgs } from './tools/create-capability.js'
 import { askAgentTool, handleAskAgent, type AskAgentArgs } from './tools/ask-agent.js'
+import { spawnTaskTool, handleSpawnTask, type SpawnTaskArgs } from './tools/spawn-task.js'
+import type { BatonStore } from './baton.js'
 import { 
   distillKnowledgeTool, 
   recallKnowledgeTool,
@@ -40,6 +42,7 @@ const BUILTIN_TOOLS: ToolDef[] = [
   distillKnowledgeTool,  // knowledge distillation
   recallKnowledgeTool,   // knowledge recall
   askAgentTool,          // A2A agent collaboration
+  spawnTaskTool,         // Baton: parallel sub-tasks
 ]
 
 // ─── Static tools: always available ───
@@ -225,6 +228,8 @@ export class LlmClient {
   private model: string
   private baseUrl: string
   public a2aToken?: string
+  public batonStore?: BatonStore
+  public currentBatonId?: string  // set when executing inside a Baton
 
   constructor(
     private apiKey: string,
@@ -468,6 +473,14 @@ export class LlmClient {
     // ── A2A collaboration ──
     if (name === 'ask_agent') {
       return await handleAskAgent(args as AskAgentArgs, this.a2aToken)
+    }
+
+    // ── Baton: spawn parallel sub-task ──
+    if (name === 'spawn_task') {
+      if (!this.batonStore || !this.currentBatonId) {
+        return JSON.stringify({ error: 'Baton system not available in this context' })
+      }
+      return await handleSpawnTask(args as SpawnTaskArgs, this.currentBatonId, this.batonStore)
     }
 
     // ── Dynamic capability tools ──

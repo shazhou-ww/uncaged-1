@@ -5,6 +5,9 @@ import { ChatStore, type ContentPart } from './chat-store.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
 import { storeImageForVL } from './utils.js'
+import { BatonStore } from './baton.js'
+import type { BatonEvent } from './baton.js'
+import { handleBatonQueue } from './baton-runner.js'
 
 export interface Env {
   TELEGRAM_BOT_TOKEN: string
@@ -18,6 +21,8 @@ export interface Env {
   CHAT_KV: KVNamespace
   MEMORY_INDEX: VectorizeIndex
   MEMORY_DB?: D1Database // Optional: structured memory storage (Issue #8)
+  BATON_DB?: D1Database  // Baton task relay storage
+  BATON_QUEUE?: Queue<import('./baton.js').BatonEvent>  // Baton event queue
   A2A_TOKEN?: string     // Optional: A2A auth token for agent collaboration
   AI: any
   DEBUG_ENABLED?: string
@@ -255,6 +260,67 @@ export default {
       })
     }
 
+    // ─── Baton endpoints ───
+
+    if (url.pathname === '/baton' && request.method === 'POST') {
+      const auth = request.headers.get('Authorization')
+      if (auth !== `Bearer ${env.SIGIL_DEPLOY_TOKEN}`) {
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (!env.BATON_DB || !env.BATON_QUEUE) {
+        return new Response(JSON.stringify({ error: 'Baton not configured' }), {
+          status: 503, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      const body = await request.json() as any
+      if (!body.prompt) {
+        return new Response(JSON.stringify({ error: 'prompt is required' }), {
+          status: 400, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      const store = new BatonStore(env.BATON_DB, env.BATON_QUEUE)
+      const baton = await store.create({
+        prompt: body.prompt,
+        hints: body.hints,
+        channel: body.channel,
+        notify: body.notify,
+      })
+      return new Response(JSON.stringify({ created: true, baton }), {
+        status: 201, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    if (url.pathname.startsWith('/baton/') && request.method === 'GET') {
+      if (!env.BATON_DB || !env.BATON_QUEUE) {
+        return new Response(JSON.stringify({ error: 'Baton not configured' }), {
+          status: 503, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      const parts = url.pathname.split('/')
+      const batonId = parts[2]
+      const action = parts[3]  // 'tree' or undefined
+      const store = new BatonStore(env.BATON_DB, env.BATON_QUEUE)
+
+      if (action === 'tree') {
+        const tree = await store.loadTree(batonId)
+        return new Response(JSON.stringify({ baton_id: batonId, tree }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      const baton = await store.load(batonId)
+      if (!baton) {
+        return new Response(JSON.stringify({ error: 'Not found' }), {
+          status: 404, headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify(baton), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
     // Debug: test vectorize round-trip
     if (url.pathname === '/debug/vectorize' && request.method === 'POST') {
       if (env.DEBUG_ENABLED !== 'true') {
@@ -326,5 +392,15 @@ export default {
     }
 
     return new Response('Not found', { status: 404 })
+  },
+
+  // ─── Baton Queue Consumer ───
+  async queue(batch: MessageBatch<BatonEvent>, env: Env): Promise<void> {
+    if (!env.BATON_DB || !env.BATON_QUEUE) {
+      console.error('[Baton Queue] BATON_DB or BATON_QUEUE not configured')
+      return
+    }
+    const store = new BatonStore(env.BATON_DB, env.BATON_QUEUE)
+    await handleBatonQueue(batch, env, store)
   },
 }

@@ -19,6 +19,20 @@ binding = "MEMORY_DB"
 database_name = "uncaged-memory"
 database_id = "24bc6992-57b0-4703-807d-6be0a6adac46"
 
+[[d1_databases]]
+binding = "BATON_DB"
+database_name = "baton-store"
+database_id = "6729fa63-c1e3-45ca-8896-689c21eabf4f"
+
+[[queues.producers]]
+queue = "baton-events"
+binding = "BATON_QUEUE"
+
+[[queues.consumers]]
+queue = "baton-events"
+max_batch_size = 5
+max_retries = 3
+
 [[routes]]
 pattern = "doudou.shazhou.work/*"
 zone_id = "dcfbc03ffea31a6afe08b657022963f8"
