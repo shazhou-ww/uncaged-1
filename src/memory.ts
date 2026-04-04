@@ -154,14 +154,49 @@ export class Memory {
           }
         }
 
-        return Array.from(merged.values())
+        const d1Results = Array.from(merged.values())
           .sort((a, b) => a.timestamp - b.timestamp)
           .slice(0, limit)
+
+        // If D1 has enough results, return them
+        // Otherwise fall through to Vectorize to supplement (D1 may not have historical data)
+        if (d1Results.length >= Math.max(3, limit / 2)) {
+          return d1Results
+        }
+
+        // D1 results are sparse — supplement with Vectorize fallback below
+        // We'll merge D1 + Vectorize results at the end
+        console.log(`[Memory] D1 recall returned only ${d1Results.length}/${limit}, supplementing with Vectorize`)
+
+        // Fall through to Vectorize path, but keep d1Results to merge
+        const vectorizeResults = await this.recallFromVectorize(startTime, endTime, limit)
+
+        // Merge: D1 results take priority (more accurate), Vectorize fills gaps
+        const allResults = new Map<string, MemoryEntry>()
+        for (const entry of [...d1Results, ...vectorizeResults]) {
+          if (!allResults.has(entry.id)) {
+            allResults.set(entry.id, entry)
+          }
+        }
+
+        return Array.from(allResults.values())
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .slice(0, limit)
+
       } catch (e) {
         console.error('[Memory] D1 recall failed, falling back to Vectorize:', e)
       }
     }
 
+    // Vectorize-only path
+    return this.recallFromVectorize(startTime, endTime, limit)
+  }
+
+  /**
+   * Recall messages from Vectorize within a time range.
+   * Private method used for fallback and supplementation.
+   */
+  private async recallFromVectorize(startTime: number, endTime: number, limit: number): Promise<MemoryEntry[]> {
     // Vectorize fallback: use a neutral embedding — but fetch more than needed and sort by time
     const neutralText = 'conversation message recall'
     const embedding = await this.embed(neutralText)
