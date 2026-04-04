@@ -9,7 +9,7 @@ interface Env {
   HEALTH_KV: KVNamespace;
   UNCAGED_URL: string;
   OC_STATUS_URL: string;
-  SIGIL_DEPLOY_TOKEN?: string;
+  UNCAGED_AUTH_TOKEN?: string;  // Bearer token for Uncaged API
   OC_STATUS_TOKEN?: string;
 }
 
@@ -38,14 +38,19 @@ async function measureLatency<T>(fn: () => Promise<T>): Promise<[T, number]> {
   return [result, latency];
 }
 
+function authHeaders(env: Env): Record<string, string> {
+  return env.UNCAGED_AUTH_TOKEN
+    ? { Authorization: `Bearer ${env.UNCAGED_AUTH_TOKEN}` }
+    : {};
+}
+
 async function checkLiveness(env: Env): Promise<CheckResult> {
   try {
     const [response, latency] = await measureLatency(() =>
       fetch(env.UNCAGED_URL, {
         method: 'GET',
-        headers: env.SIGIL_DEPLOY_TOKEN
-          ? { Authorization: `Bearer ${env.SIGIL_DEPLOY_TOKEN}` }
-          : {},
+        headers: authHeaders(env),
+        signal: AbortSignal.timeout(10000),
       })
     );
 
@@ -69,18 +74,17 @@ async function checkLiveness(env: Env): Promise<CheckResult> {
 }
 
 async function checkChat(env: Env): Promise<CheckResult> {
+  // Use /help command instead of real chat to avoid memory pollution (#17 review)
   try {
     const [response, latency] = await measureLatency(() =>
       fetch(`${env.UNCAGED_URL}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(env.SIGIL_DEPLOY_TOKEN
-            ? { Authorization: `Bearer ${env.SIGIL_DEPLOY_TOKEN}` }
-            : {}),
+          ...authHeaders(env),
         },
         body: JSON.stringify({
-          message: 'ping',
+          message: '/help',
           chat_id: 'health-check',
         }),
         signal: AbortSignal.timeout(15000),
@@ -113,9 +117,7 @@ async function checkMemory(env: Env): Promise<CheckResult> {
     const [response, latency] = await measureLatency(() =>
       fetch(`${env.UNCAGED_URL}/memory?q=test`, {
         method: 'GET',
-        headers: env.SIGIL_DEPLOY_TOKEN
-          ? { Authorization: `Bearer ${env.SIGIL_DEPLOY_TOKEN}` }
-          : {},
+        headers: authHeaders(env),
         signal: AbortSignal.timeout(10000),
       })
     );
@@ -223,25 +225,35 @@ async function handleHealthRequest(env: Env): Promise<Response> {
 
 async function handleHistoryRequest(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
-  const hours = parseInt(url.searchParams.get('hours') || '24', 10);
+  const hours = Math.min(parseInt(url.searchParams.get('hours') || '24', 10), 168);
+  const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
   const cutoff = Date.now() - hours * 60 * 60 * 1000;
 
-  const list = await env.HEALTH_KV.list({ prefix: 'health:' });
-  const keys = list.keys
-    .map((k) => k.name)
-    .filter((name) => {
-      if (name === 'health:latest') return false;
-      const timestamp = parseInt(name.replace('health:', ''), 10);
-      return !isNaN(timestamp) && timestamp >= cutoff;
-    })
-    .sort((a, b) => {
-      const tsA = parseInt(a.replace('health:', ''), 10);
-      const tsB = parseInt(b.replace('health:', ''), 10);
-      return tsB - tsA; // newest first
-    });
+  // Paginated KV list to handle >1000 keys
+  const allKeys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const opts: KVNamespaceListOptions = { prefix: 'health:' };
+    if (cursor) opts.cursor = cursor;
+    const list = await env.HEALTH_KV.list(opts);
+    for (const k of list.keys) {
+      if (k.name === 'health:latest') continue;
+      const ts = parseInt(k.name.replace('health:', ''), 10);
+      if (!isNaN(ts) && ts >= cutoff) allKeys.push(k.name);
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
+
+  // Sort newest first, limit to avoid N+1 explosion
+  allKeys.sort((a, b) => {
+    const tsA = parseInt(a.replace('health:', ''), 10);
+    const tsB = parseInt(b.replace('health:', ''), 10);
+    return tsB - tsA;
+  });
+  const selectedKeys = allKeys.slice(0, limit);
 
   const reports = await Promise.all(
-    keys.map(async (key) => {
+    selectedKeys.map(async (key) => {
       const data = await env.HEALTH_KV.get(key);
       return data ? JSON.parse(data) : null;
     })

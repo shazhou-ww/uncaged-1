@@ -9,6 +9,12 @@ crons = ["*/5 * * * *"]
 UNCAGED_URL = "https://uncaged.shazhou.workers.dev"
 OC_STATUS_URL = "https://oc-status.shazhou.workers.dev"
 
+# Secrets (set via `wrangler secret put`):
+# - UNCAGED_AUTH_TOKEN: Bearer token for Uncaged API
+# - OC_STATUS_TOKEN: Bearer token for oc-status heartbeat
+
 [[kv_namespaces]]
 binding = "HEALTH_KV"
+# ⚠️ Replace with actual KV namespace ID before deploying:
+# Run: wrangler kv namespace create HEALTH_KV
 id = "placeholder-replace-before-deploy"

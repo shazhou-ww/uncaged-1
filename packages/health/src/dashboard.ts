@@ -118,7 +118,7 @@ export function renderDashboard(): string {
 </div>
 
 <div class="section">
-  <h2>📊 Last 24 Hours</h2>
+  <h2>📊 Last 24 Hours (sampled)</h2>
   <div class="timeline" id="timeline"><div style="color:#484f58">Loading timeline...</div></div>
 </div>
 
