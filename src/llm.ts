@@ -5,6 +5,7 @@ import { SigilClient } from './sigil.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
 import type { ChatMessage, ToolCall } from './chat-store.js'
+import { createCapabilityTool, handleCreateCapability, type CreateCapabilityArgs } from './tools/create-capability.js'
 
 interface ToolDef {
   type: 'function'
@@ -14,6 +15,12 @@ interface ToolDef {
     parameters: Record<string, any>
   }
 }
+
+// ─── Built-in tools: always available ───
+
+const BUILTIN_TOOLS: ToolDef[] = [
+  createCapabilityTool,  // self-evolution
+]
 
 // ─── Static tools: always available ───
 
@@ -108,7 +115,7 @@ const MEMORY_TOOLS: ToolDef[] = [
   },
 ]
 
-const STATIC_TOOLS: ToolDef[] = [...SIGIL_TOOLS, ...MEMORY_TOOLS]
+const STATIC_TOOLS: ToolDef[] = [...BUILTIN_TOOLS, ...SIGIL_TOOLS, ...MEMORY_TOOLS]
 
 // ─── Dynamic tools: derived from chat history ───
 
@@ -335,6 +342,11 @@ export class LlmClient {
   private async executeTool(tc: ToolCall, sigil: SigilClient, memory: Memory): Promise<string> {
     const name = tc.function.name
     const args = JSON.parse(tc.function.arguments)
+
+    // ── Built-in tools ──
+    if (name === 'create_capability') {
+      return await handleCreateCapability(args as CreateCapabilityArgs, sigil)
+    }
 
     // ── Sigil tools ──
     if (name === 'sigil_query') {
