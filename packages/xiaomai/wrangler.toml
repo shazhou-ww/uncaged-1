@@ -1,0 +1,42 @@
+name = "xiaomai"
+main = "dist/index.js"
+compatibility_date = "2026-04-03"
+
+[vars]
+SIGIL_URL = "https://sigil.shazhou.work"
+INSTANCE_ID = "xiaomai"
+
+# 新的 KV namespace（聊天历史隔离）
+[[kv_namespaces]]
+binding = "CHAT_KV"
+id = "c662a108b40147dcae4dafd508d50688"
+
+# 与 doudou 共享的 Vectorize（instanceId 过滤）
+[[vectorize]]
+binding = "MEMORY_INDEX"
+index_name = "uncaged-memory-v2"
+
+# 与 doudou 共享的 D1 databases（instanceId 过滤）
+[[d1_databases]]
+binding = "MEMORY_DB"
+database_name = "uncaged-memory"
+database_id = "24bc6992-57b0-4703-807d-6be0a6adac46"
+
+[[d1_databases]]
+binding = "BATON_DB"
+database_name = "baton-store"
+database_id = "6729fa63-c1e3-45ca-8896-689c21eabf4f"
+
+# 与 doudou 共享的 Queue
+[[queues.producers]]
+queue = "baton-events"
+binding = "BATON_QUEUE"
+
+
+# xiaomai 域名路由
+[[routes]]
+pattern = "xiaomai.shazhou.work/*"
+zone_id = "dcfbc03ffea31a6afe08b657022963f8"
+
+[ai]
+binding = "AI"
