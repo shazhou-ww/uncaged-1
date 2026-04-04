@@ -72,15 +72,13 @@ export class SigilClient {
   }
 
   async run(name: string, params: Record<string, any> = {}): Promise<string> {
-    const url = new URL(`/run/${name}`, this.baseUrl)
-
-    // GET with query params for simple invocations
-    for (const [k, v] of Object.entries(params)) {
-      url.searchParams.set(k, String(v))
-    }
-
-    const res = await fetch(url.toString(), {
-      headers: { 'Authorization': `Bearer ${this.deployToken}` },
+    const res = await fetch(`${this.baseUrl}/run/${name}`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.deployToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(params),
     })
     if (!res.ok) {
       const body = await res.text()

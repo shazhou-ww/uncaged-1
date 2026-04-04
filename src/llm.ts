@@ -6,9 +6,6 @@ import { Soul } from './soul.js'
 import { Memory } from './memory.js'
 import type { ChatMessage, ToolCall } from './chat-store.js'
 
-const DASHSCOPE_BASE = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
-const MODEL = 'qwen-plus'
-
 interface ToolDef {
   type: 'function'
   function: {
@@ -198,7 +195,17 @@ function capabilityToTool(cap: CapabilityInfo): ToolDef {
 const MAX_TOOL_ROUNDS = 6
 
 export class LlmClient {
-  constructor(private apiKey: string) {}
+  private model: string
+  private baseUrl: string
+
+  constructor(
+    private apiKey: string,
+    model?: string,
+    baseUrl?: string,
+  ) {
+    this.model = model || 'qwen-plus'
+    this.baseUrl = baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+  }
 
   /**
    * Run agentic loop with dynamic tools derived from chat history.
@@ -268,31 +275,54 @@ export class LlmClient {
     messages: ChatMessage[],
     tools: ToolDef[],
   ): Promise<{ content: string | null; tool_calls?: ToolCall[] }> {
-    const res = await fetch(`${DASHSCOPE_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        messages,
-        tools: tools.length > 0 ? tools : undefined,
-        temperature: 0.3,
-      }),
-    })
+    const maxRetries = 2
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const res = await fetch(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify({
+            model: this.model,
+            messages,
+            tools: tools.length > 0 ? tools : undefined,
+            temperature: 0.3,
+          }),
+          signal: AbortSignal.timeout(30000),  // 30s timeout
+        })
 
-    if (!res.ok) {
-      const body = await res.text()
-      throw new Error(`LLM error: ${res.status} ${body}`)
+        // Retry on 429 or 5xx
+        if (res.status === 429 || res.status >= 500) {
+          if (attempt < maxRetries) {
+            await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000))
+            continue
+          }
+        }
+
+        if (!res.ok) {
+          const body = await res.text()
+          throw new Error(`LLM error: ${res.status} ${body}`)
+        }
+
+        const data: any = await res.json()
+        const choice = data.choices?.[0]?.message
+        return {
+          content: choice?.content || null,
+          tool_calls: choice?.tool_calls,
+        }
+      } catch (e: any) {
+        if (attempt < maxRetries && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+          await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000))
+          continue
+        }
+        throw e
+      }
     }
 
-    const data: any = await res.json()
-    const choice = data.choices?.[0]?.message
-    return {
-      content: choice?.content || null,
-      tool_calls: choice?.tool_calls,
-    }
+    throw new Error('LLM request failed after retries')
   }
 
   private async executeTool(tc: ToolCall, sigil: SigilClient, memory: Memory): Promise<string> {

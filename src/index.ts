@@ -8,6 +8,8 @@ import { Memory } from './memory.js'
 export interface Env {
   TELEGRAM_BOT_TOKEN: string
   DASHSCOPE_API_KEY: string
+  LLM_MODEL: string
+  LLM_BASE_URL: string
   SIGIL_DEPLOY_TOKEN: string
   SIGIL_URL: string
   INSTANCE_ID: string
@@ -36,7 +38,11 @@ export default {
     // Telegram webhook
     if (url.pathname === '/webhook' && request.method === 'POST') {
       const sigil = new SigilClient(env.SIGIL_URL, env.SIGIL_DEPLOY_TOKEN)
-      const llm = new LlmClient(env.DASHSCOPE_API_KEY)
+      const llm = new LlmClient(
+        env.DASHSCOPE_API_KEY,
+        env.LLM_MODEL || undefined,
+        env.LLM_BASE_URL || undefined,
+      )
       const chatStore = new ChatStore(env.CHAT_KV)
       const soul = new Soul(env.CHAT_KV, instanceId)
       const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId)

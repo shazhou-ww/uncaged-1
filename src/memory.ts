@@ -1,7 +1,7 @@
 // Memory — per-instance long-term memory backed by Vectorize + Workers AI embeddings
 // Every message gets embedded and stored. Retrieval by semantic similarity or time range.
 
-const EMBEDDING_MODEL = '@cf/baai/bge-base-en-v1.5'
+const EMBEDDING_MODEL = '@cf/baai/bge-m3'
 
 export interface MemoryEntry {
   id: string
@@ -13,6 +13,7 @@ export interface MemoryEntry {
   score?: number
 }
 
+// bge-m3: 1024 dims, multilingual (was bge-base-en-v1.5: 768 dims, english-only)
 export class Memory {
   constructor(
     private vectorIndex: VectorizeIndex,
