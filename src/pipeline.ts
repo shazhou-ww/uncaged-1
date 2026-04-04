@@ -1,6 +1,7 @@
 // ─── Types ───
 
 import type { ChatMessage } from './chat-store.js'
+import type { Memory } from './memory.js'
 
 export interface LlmParams {
   model: string
@@ -150,14 +151,83 @@ export function contextCompressor(maxMessages: number = 30): Adapter {
 
 // ─── Knowledge injector adapter ───
 // Injects relevant knowledge from D1 into the system prompt
-// This is a placeholder — the actual D1 query happens in the agent loop
-// But the adapter pattern allows it to be swapped/composed
+// Pre-fetches knowledge about the current contact from D1
+// and injects it into the system prompt, so the LLM doesn't
+// need a tool call to know who it's talking to.
 
-export function knowledgeInjector(): Adapter {
-  return (msgs, params) => {
-    // This adapter is a no-op placeholder.
-    // The actual knowledge injection is done via recall_knowledge tool calls.
-    // In future, we could pre-fetch knowledge here and inject into system prompt.
-    return params
+/**
+ * Knowledge injector adapter.
+ * Pre-fetches knowledge about the current contact from D1
+ * and injects it into the system prompt, so the LLM doesn't
+ * need a tool call to know who it's talking to.
+ */
+export function knowledgeInjector(memory: Memory, chatId: string): Adapter {
+  return async (msgs, params) => {
+    // Only inject if we have D1
+    if (!memory.hasD1Access()) return params
+
+    try {
+      // Try multiple search terms for the contact
+      const searchTerms = [chatId]
+      
+      // Extract display name from chat history
+      const lastUser = [...msgs].reverse().find(m => m.role === 'user')
+      if (lastUser?.content) {
+        // If message starts with [From xxx], extract name
+        const match = lastUser.content.match(/\[From\s+(.+?)\]/)
+        if (match) searchTerms.push(match[1])
+      }
+      
+      // Search knowledge for each term
+      const allKnowledge: any[] = []
+      for (const term of searchTerms) {
+        const results = await memory.recallKnowledge({ subject: term })
+        allKnowledge.push(...results)
+      }
+      
+      // Dedupe by id
+      const knowledge = [...new Map(allKnowledge.map(k => [k.id, k])).values()]
+      
+      // Also fetch general knowledge (no subject filter, just recent facts)
+      const generalKnowledge = await memory.recallKnowledge({ type: 'fact' })
+      
+      if (knowledge.length === 0 && generalKnowledge.length === 0) return params
+
+      // Build context string
+      const lines: string[] = []
+      
+      if (knowledge.length > 0) {
+        lines.push(`[Known about current contact "${chatId}":]`)
+        for (const k of knowledge) {
+          lines.push(`- [${k.type}] ${k.content}`)
+        }
+      }
+      
+      // Add some general facts (limit to 5)
+      const facts = generalKnowledge.slice(0, 5)
+      if (facts.length > 0) {
+        lines.push(`\n[General knowledge:]`)
+        for (const f of facts) {
+          lines.push(`- ${f.content}`)
+        }
+      }
+
+      const injection = lines.join('\n')
+      
+      // Inject into system prompt
+      const messages = [...params.messages]
+      if (messages[0]?.role === 'system') {
+        messages[0] = {
+          ...messages[0],
+          content: messages[0].content + `\n\n${injection}`
+        }
+      }
+      
+      console.log(`[Pipeline] Injected ${knowledge.length + facts.length} knowledge entries for ${chatId}`)
+      return { ...params, messages }
+    } catch (e) {
+      console.error('[Pipeline] Knowledge injection failed:', e)
+      return params  // graceful fallback
+    }
   }
 }

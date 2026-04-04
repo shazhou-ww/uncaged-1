@@ -172,7 +172,7 @@ export default {
         messages.push({ role: 'user', content: body.message })
 
         // Run agentic loop
-        const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory)
+        const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory, chatId)
 
         // Store reply + save history
         await chatStore.save(chatId, updatedMessages)

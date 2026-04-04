@@ -40,6 +40,10 @@ export class Memory {
     }
   }
 
+  hasD1Access(): boolean {
+    return this.hasD1
+  }
+
   /**
    * Store a message in long-term memory with its embedding.
    * Dual-write: D1 (structured) + Vectorize (semantic search).

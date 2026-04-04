@@ -118,7 +118,7 @@ export async function handleTelegramWebhook(
     messages.push({ role: 'user', content: userText })
 
     // Run agentic loop
-    const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory)
+    const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory, memorySessionId)
 
     // Stop typing
     typingInterval.stop()

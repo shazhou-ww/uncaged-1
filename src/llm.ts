@@ -10,6 +10,7 @@ import {
   baseAdapter, 
   modelSelector, 
   temperatureAdapter, 
+  knowledgeInjector,
   contextCompressor 
 } from './pipeline.js'
 import { createCapabilityTool, handleCreateCapability, type CreateCapabilityArgs } from './tools/create-capability.js'
@@ -242,6 +243,7 @@ export class LlmClient {
     sigil: SigilClient,
     soul: Soul,
     memory: Memory,
+    chatId?: string,
   ): Promise<{ reply: string; updatedMessages: ChatMessage[] }> {
 
     // Build system prompt from Soul + Instructions
@@ -259,6 +261,7 @@ export class LlmClient {
       baseAdapter(this.model),
       modelSelector(),
       temperatureAdapter(),
+      knowledgeInjector(memory, chatId || 'unknown'),
       contextCompressor(30),
     )
     
