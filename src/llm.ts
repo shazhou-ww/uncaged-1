@@ -6,6 +6,14 @@ import { Soul } from './soul.js'
 import { Memory } from './memory.js'
 import type { ChatMessage, ToolCall } from './chat-store.js'
 import { createCapabilityTool, handleCreateCapability, type CreateCapabilityArgs } from './tools/create-capability.js'
+import { 
+  distillKnowledgeTool, 
+  recallKnowledgeTool,
+  handleDistillKnowledge,
+  handleRecallKnowledge,
+  type DistillKnowledgeArgs,
+  type RecallKnowledgeArgs
+} from './tools/distill-knowledge.js'
 
 interface ToolDef {
   type: 'function'
@@ -20,6 +28,8 @@ interface ToolDef {
 
 const BUILTIN_TOOLS: ToolDef[] = [
   createCapabilityTool,  // self-evolution
+  distillKnowledgeTool,  // knowledge distillation
+  recallKnowledgeTool,   // knowledge recall
 ]
 
 // ─── Static tools: always available ───
@@ -394,6 +404,15 @@ export class LlmClient {
     if (name === 'memory_forget') {
       const ok = await memory.forget(args.id)
       return JSON.stringify({ forgotten: ok, id: args.id })
+    }
+
+    // ── Knowledge tools ──
+    if (name === 'distill_knowledge') {
+      return await handleDistillKnowledge(args as DistillKnowledgeArgs, memory)
+    }
+
+    if (name === 'recall_knowledge') {
+      return await handleRecallKnowledge(args as RecallKnowledgeArgs, memory)
     }
 
     // ── Dynamic capability tools ──

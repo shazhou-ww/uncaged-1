@@ -13,6 +13,17 @@ export interface MemoryEntry {
   score?: number
 }
 
+export interface KnowledgeEntry {
+  id: string
+  type: 'profile' | 'event' | 'preference' | 'fact'
+  subject: string
+  content: string
+  confidence: number
+  sourceIds?: string[]
+  createdAt: number
+  updatedAt: number
+}
+
 // bge-m3: 1024 dims, multilingual (was bge-base-en-v1.5: 768 dims, english-only)
 export class Memory {
   private hasD1: boolean
@@ -321,5 +332,124 @@ export class Memory {
 
     // Sort by timestamp
     return Array.from(allEntries.values()).sort((a, b) => a.timestamp - b.timestamp)
+  }
+
+  // ─── Knowledge Distillation Methods ───
+
+  /**
+   * Distill and store structured knowledge from conversations.
+   * Updates existing knowledge if same subject+type exists, otherwise creates new.
+   */
+  async distillKnowledge(
+    type: 'profile' | 'event' | 'preference' | 'fact', 
+    subject: string, 
+    content: string, 
+    confidence: number = 0.8, 
+    sourceIds?: string[]
+  ): Promise<{id: string, updated: boolean}> {
+    if (!this.hasD1 || !this.db) {
+      throw new Error('Knowledge system requires D1 database')
+    }
+
+    console.log(`[Knowledge] Distilling ${type} about "${subject}"`)
+
+    // Normalize subject for consistent matching
+    const normalizedSubject = subject.trim().toLowerCase()
+    const now = Date.now()
+    const sourceIdsJson = sourceIds ? JSON.stringify(sourceIds) : null
+
+    try {
+      // Check if knowledge with same subject+type exists
+      const existing = await this.db.prepare(`
+        SELECT id, content, confidence FROM knowledge 
+        WHERE instance_id = ? AND type = ? AND LOWER(subject) = ?
+      `).bind(this.instanceId, type, normalizedSubject).first()
+
+      if (existing) {
+        // Update existing knowledge
+        const existingData = existing as any
+        await this.db.prepare(`
+          UPDATE knowledge 
+          SET content = ?, confidence = ?, source_ids = ?, updated_at = ?
+          WHERE id = ?
+        `).bind(content, confidence, sourceIdsJson, now, existingData.id).run()
+
+        console.log(`[Knowledge] Updated existing ${type} for "${subject}"`)
+        return { id: existingData.id, updated: true }
+      } else {
+        // Insert new knowledge
+        const id = `knowledge_${this.instanceId}_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`
+        await this.db.prepare(`
+          INSERT INTO knowledge (id, instance_id, type, subject, content, confidence, source_ids, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(id, this.instanceId, type, subject, content, confidence, sourceIdsJson, now, now).run()
+
+        console.log(`[Knowledge] Created new ${type} for "${subject}"`)
+        return { id, updated: false }
+      }
+    } catch (e: any) {
+      console.error('[Knowledge] Distillation failed:', e.message)
+      throw e
+    }
+  }
+
+  /**
+   * Search structured knowledge base for information about a person, topic, or event.
+   * More accurate than raw memory search for known facts.
+   */
+  async recallKnowledge(opts: {
+    subject?: string, 
+    type?: 'profile' | 'event' | 'preference' | 'fact', 
+    query?: string
+  }): Promise<KnowledgeEntry[]> {
+    if (!this.hasD1 || !this.db) {
+      throw new Error('Knowledge system requires D1 database')
+    }
+
+    console.log(`[Knowledge] Recalling knowledge:`, opts)
+
+    try {
+      let sql = `SELECT * FROM knowledge WHERE instance_id = ?`
+      const params: any[] = [this.instanceId]
+
+      // Build WHERE conditions
+      if (opts.type) {
+        sql += ` AND type = ?`
+        params.push(opts.type)
+      }
+
+      if (opts.subject) {
+        sql += ` AND (LOWER(subject) LIKE ? OR LOWER(content) LIKE ?)`
+        const subjectPattern = `%${opts.subject.toLowerCase()}%`
+        params.push(subjectPattern, subjectPattern)
+      }
+
+      if (opts.query) {
+        sql += ` AND LOWER(content) LIKE ?`
+        params.push(`%${opts.query.toLowerCase()}%`)
+      }
+
+      sql += ` ORDER BY updated_at DESC LIMIT 20`
+
+      const results = await this.db.prepare(sql).bind(...params).all()
+      
+      const entries: KnowledgeEntry[] = (results.results || []).map((row: any) => ({
+        id: row.id,
+        type: row.type as 'profile' | 'event' | 'preference' | 'fact',
+        subject: row.subject,
+        content: row.content,
+        confidence: row.confidence,
+        sourceIds: row.source_ids ? JSON.parse(row.source_ids) : undefined,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }))
+
+      console.log(`[Knowledge] Found ${entries.length} knowledge entries`)
+      return entries
+
+    } catch (e: any) {
+      console.error('[Knowledge] Recall failed:', e.message)
+      return []
+    }
   }
 }
