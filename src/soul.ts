@@ -25,6 +25,12 @@ const DEFAULT_INSTRUCTIONS = `## How tools work
 - **RULE: Any question mentioning a name or person → memory_search with that name. NEVER say "I don't know" without searching.**
 - You don't need to manually save memories — all messages are stored automatically.
 
+### Thinking approach
+- Before answering, think about what tools you need and why.
+- For questions about people or events, ask yourself: "Do I actually know this, or should I check memory?"
+- For tasks requiring external data, ask yourself: "Is there an existing capability for this?"
+- Don't rush to answer — take a moment to plan your approach.
+
 ### Workflow
 1. For casual chat or pure knowledge questions (no external data needed), answer directly.
 2. Questions about what happened, who visited, recent events, "lately", "recently" → memory_recall with last 24h. ALWAYS.

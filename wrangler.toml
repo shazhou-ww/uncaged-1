@@ -2,22 +2,22 @@ name = "uncaged"
 main = "src/index.ts"
 compatibility_date = "2026-04-03"
 
+[vars]
+SIGIL_URL = "https://sigil.shazhou.work"
+INSTANCE_ID = "doudou"
+
 [[kv_namespaces]]
 binding = "CHAT_KV"
 id = "84a3ac3b64c846bd9e6c2b8632dc2499"
 
 [[vectorize]]
 binding = "MEMORY_INDEX"
-index_name = "uncaged-memory"
+index_name = "uncaged-memory-v2"
+
+[[d1_databases]]
+binding = "MEMORY_DB"
+database_name = "uncaged-memory"
+database_id = "24bc6992-57b0-4703-807d-6be0a6adac46"
 
 [ai]
 binding = "AI"
-
-[vars]
-SIGIL_URL = "https://sigil.shazhou.work"
-INSTANCE_ID = "doudou"
-
-# Secrets (set via wrangler secret put):
-# TELEGRAM_BOT_TOKEN
-# DASHSCOPE_API_KEY
-# SIGIL_DEPLOY_TOKEN

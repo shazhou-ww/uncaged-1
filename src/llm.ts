@@ -202,7 +202,7 @@ export class LlmClient {
     model?: string,
     baseUrl?: string,
   ) {
-    this.model = model || 'qwen-plus'
+    this.model = model || 'qwen3-max'
     this.baseUrl = baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
   }
 
@@ -296,6 +296,7 @@ export class LlmClient {
             messages,
             tools: tools.length > 0 ? tools : undefined,
             temperature: 0.3,
+            enable_thinking: true,
           }),
           signal: AbortSignal.timeout(30000),  // 30s timeout
         })
