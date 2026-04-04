@@ -32,6 +32,9 @@ export async function handleTelegramWebhook(
   const chatId = msg.chat.id
   const userText = msg.text.trim()
   const userName = msg.from?.first_name || 'there'
+  const userTag = msg.from?.username || msg.from?.first_name || String(chatId)
+  // Memory session tag: identifies who this conversation is with
+  const memorySessionId = `telegram:${userTag}`
 
   // ─── Chat ID whitelist check ───
   const allowedChats = env.ALLOWED_CHAT_IDS
@@ -101,7 +104,7 @@ export async function handleTelegramWebhook(
 
   try {
     // Store user message embedding (async, don't block)
-    const storeUserPromise = memory.store(userText, 'user', chatId)
+    const storeUserPromise = memory.store(userText, 'user', memorySessionId)
 
     // Load chat history
     let messages = await chatStore.load(chatId)
@@ -120,7 +123,7 @@ export async function handleTelegramWebhook(
     typingInterval.stop()
 
     // Store assistant reply embedding (async)
-    const storeAssistantPromise = memory.store(reply, 'assistant', chatId)
+    const storeAssistantPromise = memory.store(reply, 'assistant', memorySessionId)
 
     // Save chat history
     await chatStore.save(chatId, updatedMessages)

@@ -236,12 +236,13 @@ export class LlmClient {
         if (memories.length > 0) {
           const memoryContext = memories.map(m => {
             const time = m.timestamp ? new Date(m.timestamp).toISOString().slice(0, 16) : '?'
-            return `[${time}] ${m.role}: ${m.text}`
+            const source = m.chatId ? `(session: ${m.chatId})` : ''
+            return `[${time}] ${m.role} ${source}: ${m.text}`
           }).join('\n')
           // Inject as a system message right after the main system prompt
           const memoryMsg: ChatMessage = {
             role: 'system',
-            content: `## Relevant memories (auto-retrieved)\nThese are past conversations that may be relevant. Use them to provide context-aware responses.\n\n${memoryContext}`,
+            content: `## Relevant memories (auto-retrieved)\nThese are past conversations from different sessions/users that may be relevant. Each entry shows the session source — use this to distinguish WHO said what. The current conversation's session is different from memory sources.\n\n${memoryContext}`,
           }
           // Insert after the first system message
           messages.splice(1, 0, memoryMsg)
