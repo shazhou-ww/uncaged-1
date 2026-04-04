@@ -117,10 +117,20 @@ export class Memory {
    * Falls back to Vectorize if D1 not available (legacy mode).
    */
   async recall(startTime: number, endTime: number, limit = 20): Promise<MemoryEntry[]> {
-    // D1 path: accurate time-range query
+    // D1 path: per-contact latest + global recent, merged & deduped
     if (this.hasD1 && this.db) {
       try {
-        const result = await this.db.prepare(`
+        // Step 1: Latest message from each contact (chat_id) in time range
+        const perContact = await this.db.prepare(`
+          SELECT id, text, role, timestamp, chat_id, instance_id FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY timestamp DESC) as rn
+            FROM memories
+            WHERE instance_id = ? AND timestamp BETWEEN ? AND ?
+          ) WHERE rn = 1
+        `).bind(this.instanceId, startTime, endTime).all()
+
+        // Step 2: Global most recent N messages
+        const recent = await this.db.prepare(`
           SELECT id, text, role, timestamp, chat_id, instance_id
           FROM memories
           WHERE instance_id = ? AND timestamp BETWEEN ? AND ?
@@ -128,14 +138,25 @@ export class Memory {
           LIMIT ?
         `).bind(this.instanceId, startTime, endTime, limit).all()
 
-        return (result.results || []).map((row: any) => ({
-          id: row.id,
-          text: row.text,
-          role: row.role as 'user' | 'assistant',
-          timestamp: row.timestamp,
-          chatId: row.chat_id,
-          instanceId: row.instance_id,
-        }))
+        // Step 3: Merge + dedupe by id + sort by timestamp
+        const merged = new Map<string, MemoryEntry>()
+        for (const row of [...(perContact.results || []), ...(recent.results || [])]) {
+          const r = row as any
+          if (!merged.has(r.id)) {
+            merged.set(r.id, {
+              id: r.id,
+              text: r.text,
+              role: r.role as 'user' | 'assistant',
+              timestamp: r.timestamp,
+              chatId: r.chat_id,
+              instanceId: r.instance_id,
+            })
+          }
+        }
+
+        return Array.from(merged.values())
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .slice(0, limit)
       } catch (e) {
         console.error('[Memory] D1 recall failed, falling back to Vectorize:', e)
       }
