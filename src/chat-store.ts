@@ -1,10 +1,28 @@
 // Chat history storage — KV-backed, per chat_id
 
+export type MessageContent = string | ContentPart[]
+
+export interface ContentPart {
+  type: 'text' | 'image_url'
+  text?: string
+  image_url?: { url: string }
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool'
-  content: string | null
+  content?: MessageContent | null
   tool_calls?: ToolCall[]
   tool_call_id?: string
+}
+
+/**
+ * Helper function to extract text content from multimodal content.
+ * For backward compatibility with code that expects string content.
+ */
+export function getTextContent(content: MessageContent | null | undefined): string {
+  if (!content) return ''
+  if (typeof content === 'string') return content
+  return content.filter(p => p.type === 'text').map(p => p.text || '').join('\n')
 }
 
 export interface ToolCall {

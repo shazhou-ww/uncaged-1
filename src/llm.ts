@@ -164,7 +164,8 @@ function extractCapabilitiesFromHistory(messages: ChatMessage[]): CapabilityInfo
   for (const msg of messages) {
     if (msg.role === 'tool' && msg.content) {
       try {
-        const data = JSON.parse(msg.content)
+        // Tool messages are always strings
+        const data = JSON.parse(msg.content as string)
         if (data.items && Array.isArray(data.items)) {
           for (const item of data.items) {
             if (item.capability) {

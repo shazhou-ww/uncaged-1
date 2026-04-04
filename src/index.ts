@@ -1,7 +1,7 @@
 import { handleTelegramWebhook } from './telegram.js'
 import { SigilClient } from './sigil.js'
 import { LlmClient } from './llm.js'
-import { ChatStore } from './chat-store.js'
+import { ChatStore, type ContentPart } from './chat-store.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
 
@@ -98,7 +98,7 @@ export default {
     }
 
     // Direct chat API (non-Telegram, for agents/CLI)
-    // POST /chat { "message": "...", "chat_id": "xiaoju" }
+    // POST /chat { "message": "...", "chat_id": "xiaoju", "image_url": "..." }
     if (url.pathname === '/chat' && request.method === 'POST') {
       const auth = request.headers.get('Authorization')
       if (auth !== `Bearer ${env.SIGIL_DEPLOY_TOKEN}`) {
@@ -162,14 +162,25 @@ export default {
       }
 
       try {
-        // Store user message
+        // Store user message (text only)
         const storePromise = memory.store(body.message, 'user', chatId)
 
         // Load + compress history
         let messages = await chatStore.load(chatId)
         const { messages: compressed } = chatStore.maybeCompress(messages)
         messages = compressed
-        messages.push({ role: 'user', content: body.message })
+        
+        // Add user message (multimodal or text-only)
+        if (body.image_url) {
+          const content: ContentPart[] = [
+            { type: 'text', text: body.message },
+            { type: 'image_url', image_url: { url: body.image_url } }
+          ]
+          messages.push({ role: 'user', content })
+          console.log('[Multimodal] /chat API: Added multimodal message')
+        } else {
+          messages.push({ role: 'user', content: body.message })
+        }
 
         // Run agentic loop
         const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory, chatId)

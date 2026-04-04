@@ -2,7 +2,7 @@
 
 import { SigilClient } from './sigil.js'
 import { LlmClient } from './llm.js'
-import { ChatStore } from './chat-store.js'
+import { ChatStore, type ContentPart } from './chat-store.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
 import type { Env } from './index.js'
@@ -13,6 +13,14 @@ interface TelegramUpdate {
     chat: { id: number }
     from?: { id: number; first_name?: string; username?: string }
     text?: string
+    caption?: string
+    photo?: Array<{
+      file_id: string
+      file_unique_id: string
+      width: number
+      height: number
+      file_size?: number
+    }>
   }
 }
 
@@ -28,10 +36,15 @@ export async function handleTelegramWebhook(
 ): Promise<Response> {
   const update: TelegramUpdate = await request.json()
   const msg = update.message
-  if (!msg?.text) return new Response('ok')
+
+  const hasPhoto = msg?.photo && msg.photo.length > 0
+  const hasText = !!msg?.text
+  const caption = msg?.caption || ''
+
+  if (!hasText && !hasPhoto) return new Response('ok')
 
   const chatId = msg.chat.id
-  const userText = msg.text.trim()
+  let userText = (msg.text || caption).trim()
   const userName = msg.from?.first_name || 'there'
   const userTag = msg.from?.username || msg.from?.first_name || String(chatId)
   // Memory session tag: identifies who this conversation is with
@@ -73,7 +86,8 @@ export async function handleTelegramWebhook(
       `- Search and use existing capabilities\n` +
       `- Create new capabilities on the fly\n` +
       `- Remember things across conversations\n` +
-      `- Recall past conversations by topic or time\n\n` +
+      `- Recall past conversations by topic or time\n` +
+      `- See and understand images you send me\n\n` +
       `Just chat naturally!`)
     return new Response('ok')
   }
@@ -92,20 +106,38 @@ export async function handleTelegramWebhook(
   }
 
   // Ignore other / commands gracefully
-  if (userText.startsWith('/')) {
+  if (userText.startsWith('/') && !hasPhoto) {
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
       `Unknown command. Type /help to see available commands.`)
     return new Response('ok')
   }
 
-  // ─── Normal message ───
+  // ─── Normal message (text or multimodal) ───
 
   // Show typing indicator + keep it alive during processing
   const typingInterval = startTypingIndicator(env.TELEGRAM_BOT_TOKEN, chatId, ctx)
 
   try {
-    // Store user message embedding (async, don't block)
-    const storeUserPromise = memory.store(userText, 'user', memorySessionId)
+    // Get image URL if photo is present
+    let imageUrl: string | undefined
+    if (hasPhoto && msg.photo) {
+      // Telegram photo array: last element is highest resolution
+      const photo = msg.photo[msg.photo.length - 1]
+      const fileId = photo.file_id
+      
+      console.log('[Multimodal] Photo detected, file_id:', fileId)
+      
+      // Get file URL from Telegram
+      const fileRes = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getFile?file_id=${fileId}`)
+      const fileData = await fileRes.json() as any
+      if (fileData.ok && fileData.result.file_path) {
+        imageUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileData.result.file_path}`
+        console.log('[Multimodal] Image URL:', imageUrl)
+      }
+    }
+
+    // Store user message embedding (text only, don't store image URLs)
+    const storeUserPromise = memory.store(userText || '[Image]', 'user', memorySessionId)
 
     // Load chat history
     let messages = await chatStore.load(chatId)
@@ -114,8 +146,17 @@ export async function handleTelegramWebhook(
     const { messages: compressed } = chatStore.maybeCompress(messages)
     messages = compressed
 
-    // Add user message
-    messages.push({ role: 'user', content: userText })
+    // Add user message (multimodal or text-only)
+    if (imageUrl) {
+      // Multimodal message
+      const content: ContentPart[] = []
+      if (userText) content.push({ type: 'text', text: userText })
+      content.push({ type: 'image_url', image_url: { url: imageUrl } })
+      messages.push({ role: 'user', content })
+      console.log('[Multimodal] Added multimodal message with', content.length, 'parts')
+    } else {
+      messages.push({ role: 'user', content: userText })
+    }
 
     // Run agentic loop
     const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory, memorySessionId)

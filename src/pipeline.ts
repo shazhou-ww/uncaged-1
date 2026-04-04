@@ -1,6 +1,7 @@
 // ─── Types ───
 
 import type { ChatMessage } from './chat-store.js'
+import { getTextContent } from './chat-store.js'
 import type { Memory } from './memory.js'
 
 export interface LlmParams {
@@ -50,7 +51,15 @@ export function baseAdapter(defaultModel: string): Adapter {
 export function modelSelector(): Adapter {
   return (msgs, params) => {
     const lastUserMsg = [...msgs].reverse().find(m => m.role === 'user')
-    const text = lastUserMsg?.content?.toLowerCase() || ''
+    const content = lastUserMsg?.content
+    
+    // Multimodal → vision model
+    if (Array.isArray(content) && content.some(p => p.type === 'image_url')) {
+      console.log('[Pipeline] Model: qwen3-vl-plus (image detected)')
+      return { ...params, model: 'qwen3-vl-plus' }
+    }
+    
+    const text = getTextContent(content).toLowerCase()
     
     // Code-heavy → coder model
     if (text.includes('写代码') || text.includes('code') || text.includes('实现') || 
@@ -78,7 +87,7 @@ export function modelSelector(): Adapter {
 export function temperatureAdapter(): Adapter {
   return (msgs, params) => {
     const lastUserMsg = [...msgs].reverse().find(m => m.role === 'user')
-    const text = lastUserMsg?.content?.toLowerCase() || ''
+    const text = getTextContent(lastUserMsg?.content).toLowerCase()
     
     // Factual/lookup → low temp
     if (text.includes('是谁') || text.includes('what is') || text.includes('查') || 
@@ -126,9 +135,11 @@ export function contextCompressor(maxMessages: number = 30): Adapter {
     const summaryParts: string[] = []
     for (const msg of old) {
       if (msg.role === 'user') {
-        summaryParts.push(`User: ${(msg.content || '').slice(0, 80)}`)
-      } else if (msg.role === 'assistant' && msg.content) {
-        summaryParts.push(`You: ${msg.content.slice(0, 80)}`)
+        const content = getTextContent(msg.content)
+        summaryParts.push(`User: ${content.slice(0, 80)}`)
+      } else if (msg.role === 'assistant') {
+        const content = getTextContent(msg.content)
+        if (content) summaryParts.push(`You: ${content.slice(0, 80)}`)
       }
       // Skip tool messages in summary
     }
@@ -174,7 +185,8 @@ export function knowledgeInjector(memory: Memory, chatId: string): Adapter {
       const lastUser = [...msgs].reverse().find(m => m.role === 'user')
       if (lastUser?.content) {
         // If message starts with [From xxx], extract name
-        const match = lastUser.content.match(/\[From\s+(.+?)\]/)
+        const textContent = getTextContent(lastUser.content)
+        const match = textContent.match(/\[From\s+(.+?)\]/)
         if (match) searchTerms.push(match[1])
       }
       
