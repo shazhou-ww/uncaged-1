@@ -193,40 +193,6 @@ function capabilityToTool(cap: CapabilityInfo): ToolDef {
   }
 }
 
-// ─── System prompt builder ───
-
-function buildSystemPrompt(soul: string): string {
-  return `${soul}
-
-## How tools work
-
-### Capabilities (Sigil)
-- You always have sigil_query and sigil_deploy available.
-- When you use sigil_query, matching capabilities automatically appear as callable tools (prefixed with cap_).
-- When you use sigil_deploy to create a new capability, it also appears as a callable tool.
-- If a capability tool disappears from your tool list, just sigil_query for it again.
-
-### Memory
-- Every conversation message is automatically stored in your long-term memory with semantic embeddings.
-- Use memory_search to semantically recall past conversations (finds relevant messages by meaning).
-- Use memory_recall to retrieve messages from a specific time period.
-- Use memory_forget to delete specific entries.
-- At the start of a new conversation, proactively search memory for what you know about the user.
-- You don't need to manually save memories — all messages are stored automatically.
-
-### Workflow
-1. For casual chat or pure knowledge questions (no external data needed), answer directly.
-2. For ANYTHING that requires external data, computation, or API access:
-   a. ALWAYS use sigil_query first to search for existing capabilities.
-   b. If found, call the capability tool directly (e.g., cap_xiaoju_github_repos).
-   c. If not found, use sigil_deploy to create it, then call it.
-   d. NEVER try to answer with fabricated data or suggest the user do it manually.
-3. If a tool call fails, read the error and adjust your approach.
-4. Proactively remember things — user preferences, important facts, decisions made.
-
-Be concise and helpful.`
-}
-
 // ─── Agent loop ───
 
 const MAX_TOOL_ROUNDS = 6
@@ -236,7 +202,7 @@ export class LlmClient {
 
   /**
    * Run agentic loop with dynamic tools derived from chat history.
-   * Soul defines personality, Memory provides long-term knowledge.
+   * Soul defines personality + instructions, Memory provides long-term knowledge.
    */
   async agentLoop(
     messages: ChatMessage[],
@@ -245,9 +211,8 @@ export class LlmClient {
     memory: Memory,
   ): Promise<{ reply: string; updatedMessages: ChatMessage[] }> {
 
-    // Build system prompt from Soul
-    const soulText = await soul.get()
-    const systemPrompt = buildSystemPrompt(soulText)
+    // Build system prompt from Soul + Instructions
+    const systemPrompt = await soul.buildSystemPrompt()
 
     // Ensure system prompt is first
     if (messages.length === 0 || messages[0].role !== 'system') {

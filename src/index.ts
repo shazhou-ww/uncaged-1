@@ -44,8 +44,8 @@ export default {
 
     // Soul management API
     if (url.pathname === '/soul' && request.method === 'GET') {
-      const soul = new Soul(env.CHAT_KV, instanceId)
-      const text = await soul.get()
+      const soulObj = new Soul(env.CHAT_KV, instanceId)
+      const text = await soulObj.getSoul()
       return new Response(JSON.stringify({ instance: instanceId, soul: text }), {
         headers: { 'Content-Type': 'application/json' },
       })
@@ -57,8 +57,30 @@ export default {
         return new Response('Unauthorized', { status: 401 })
       }
       const body: any = await request.json()
-      const soul = new Soul(env.CHAT_KV, instanceId)
-      await soul.set(body.soul)
+      const soulObj = new Soul(env.CHAT_KV, instanceId)
+      await soulObj.setSoul(body.soul)
+      return new Response(JSON.stringify({ ok: true, instance: instanceId }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    // Instructions management API
+    if (url.pathname === '/instructions' && request.method === 'GET') {
+      const soulObj = new Soul(env.CHAT_KV, instanceId)
+      const text = await soulObj.getInstructions()
+      return new Response(JSON.stringify({ instance: instanceId, instructions: text }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    if (url.pathname === '/instructions' && request.method === 'PUT') {
+      const auth = request.headers.get('Authorization')
+      if (auth !== `Bearer ${env.SIGIL_DEPLOY_TOKEN}`) {
+        return new Response('Unauthorized', { status: 401 })
+      }
+      const body: any = await request.json()
+      const soulObj = new Soul(env.CHAT_KV, instanceId)
+      await soulObj.setInstructions(body.instructions)
       return new Response(JSON.stringify({ ok: true, instance: instanceId }), {
         headers: { 'Content-Type': 'application/json' },
       })

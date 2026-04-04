@@ -30,71 +30,101 @@ export async function handleTelegramWebhook(
   if (!msg?.text) return new Response('ok')
 
   const chatId = msg.chat.id
-  const userText = msg.text
+  const userText = msg.text.trim()
+  const userName = msg.from?.first_name || 'there'
 
-  // /start command — reset conversation
+  // ─── Commands ───
+
   if (userText === '/start') {
     await chatStore.clear(chatId)
+    const soulText = await soul.getSoul()
+    // Extract name from soul if possible
+    const nameMatch = soulText.match(/You are (.+?)[,\n]/)
+    const botName = nameMatch ? nameMatch[1] : 'Uncaged 🔓'
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
-      '🔓 Hi! I\'m Uncaged — a Sigil-native AI agent.\n\n' +
-      'I can discover capabilities, create new ones, and I remember everything across conversations.\n\n' +
-      'Just tell me what you need!\n\n' +
-      'Commands:\n/start — reset conversation\n/clear — clear chat history\n/soul — show my personality')
+      `Hey ${userName}! I'm ${botName}\n\n` +
+      `I can discover and create capabilities on the fly. Just tell me what you need!\n\n` +
+      `Type /help to see what I can do.`)
     return new Response('ok')
   }
 
-  // /clear command
+  if (userText === '/help') {
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
+      `🔓 Commands:\n\n` +
+      `/start - Reset conversation\n` +
+      `/clear - Clear chat history (memory retained)\n` +
+      `/soul - Show my personality\n` +
+      `/help - This message\n\n` +
+      `💡 Things I can do:\n` +
+      `- Search and use existing capabilities\n` +
+      `- Create new capabilities on the fly\n` +
+      `- Remember things across conversations\n` +
+      `- Recall past conversations by topic or time\n\n` +
+      `Just chat naturally!`)
+    return new Response('ok')
+  }
+
   if (userText === '/clear') {
     await chatStore.clear(chatId)
-    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, '🧹 Conversation cleared! (Long-term memory retained)')
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
+      '🧹 Chat cleared! Long-term memory is still intact.')
     return new Response('ok')
   }
 
-  // /soul command
   if (userText === '/soul') {
-    const soulText = await soul.get()
+    const soulText = await soul.getSoul()
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, `👻 My soul:\n\n${soulText}`)
     return new Response('ok')
   }
 
+  // Ignore other / commands gracefully
+  if (userText.startsWith('/')) {
+    await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
+      `Unknown command. Type /help to see available commands.`)
+    return new Response('ok')
+  }
+
+  // ─── Normal message ───
+
   try {
-    // 1. Store user message embedding (async, don't block)
+    // Store user message embedding (async, don't block)
     const storeUserPromise = memory.store(userText, 'user', chatId)
 
-    // 2. Load chat history
+    // Load chat history
     let messages = await chatStore.load(chatId)
 
-    // 3. Compress if needed
+    // Compress if needed
     const { messages: compressed } = chatStore.maybeCompress(messages)
     messages = compressed
 
-    // 4. Add user message
+    // Add user message
     messages.push({ role: 'user', content: userText })
 
-    // 5. Run agentic loop
+    // Run agentic loop
     const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory)
 
-    // 6. Store assistant reply embedding (async)
+    // Store assistant reply embedding (async)
     const storeAssistantPromise = memory.store(reply, 'assistant', chatId)
 
-    // 7. Save chat history
+    // Save chat history
     await chatStore.save(chatId, updatedMessages)
 
-    // 8. Reply to user
+    // Reply
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId, reply)
 
-    // 9. Await embedding storage (best effort)
+    // Await embedding storage (best effort)
     await Promise.allSettled([storeUserPromise, storeAssistantPromise])
   } catch (e: any) {
     console.error('[uncaged] error:', e)
     await sendTelegram(env.TELEGRAM_BOT_TOKEN, chatId,
-      `⚠️ Something went wrong: ${e.message || 'Unknown error'}`)
+      `Oops, something went wrong. Try again?`)
   }
 
   return new Response('ok')
 }
 
 async function sendTelegram(token: string, chatId: number, text: string): Promise<void> {
+  // Try Markdown first, fall back to plain text
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
