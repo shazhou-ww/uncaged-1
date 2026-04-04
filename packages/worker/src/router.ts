@@ -24,6 +24,7 @@ export async function handleCommonRoutes(
   env: WorkerEnv,
   clients: CoreClients,
   instanceId: string,
+  options?: { webEnabled?: boolean },
 ): Promise<Response | null> {
   const url = new URL(request.url)
   const { sigil, llm, chatStore, soul, memory } = clients
@@ -38,7 +39,7 @@ export async function handleCommonRoutes(
       description: 'Sigil-native AI Agent — unified worker, strategy-injected instances',
       channels: {
         telegram: !!env.TELEGRAM_BOT_TOKEN,
-        web: !!env.GOOGLE_CLIENT_ID,
+        web: !!options?.webEnabled,
       },
     }), { headers: { 'Content-Type': 'application/json' } })
   }

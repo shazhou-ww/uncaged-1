@@ -22,6 +22,8 @@ export interface WorkerEnv extends Env {
   GOOGLE_CLIENT_ID?: string
   GOOGLE_CLIENT_SECRET?: string
   SESSION_SECRET?: string
+  // Comma-separated list of instanceIds that enable web channel (e.g. "xiaomai,another")
+  WEB_INSTANCES?: string
 }
 
 // Session interface (used by web channel)
@@ -30,6 +32,13 @@ export interface UserSession {
   name: string
   picture: string
   created_at: number
+}
+
+/** Check if this instance has web channel enabled */
+function isWebInstance(env: WorkerEnv, instanceId: string): boolean {
+  if (!env.WEB_INSTANCES) return false
+  const allowed = new Set(env.WEB_INSTANCES.split(',').map(s => s.trim()))
+  return allowed.has(instanceId)
 }
 
 /** Extract instanceId from hostname: "doudou.shazhou.work" → "doudou" */
@@ -70,12 +79,13 @@ export default {
     }
 
     // ─── Web channel (OAuth + UI + API) ───
+    const webEnabled = env.GOOGLE_CLIENT_ID && isWebInstance(env, instanceId)
     if (
       url.pathname.startsWith('/auth/') ||
       url.pathname.startsWith('/api/') ||
-      (url.pathname === '/' && request.method === 'GET' && env.GOOGLE_CLIENT_ID)
+      (url.pathname === '/' && request.method === 'GET' && webEnabled)
     ) {
-      if (!env.GOOGLE_CLIENT_ID) {
+      if (!webEnabled) {
         return new Response('Web channel not configured for this instance', { status: 404 })
       }
       const webResponse = await handleWebRoutes(request, env, clients, instanceId)
@@ -84,7 +94,7 @@ export default {
     }
 
     // ─── Common routes (soul/chat/memory/baton/image/health/debug) ───
-    const commonResponse = await handleCommonRoutes(request, env, clients, instanceId)
+    const commonResponse = await handleCommonRoutes(request, env, clients, instanceId, { webEnabled: !!webEnabled })
     if (commonResponse) return commonResponse
 
     return new Response('Not found', { status: 404 })
