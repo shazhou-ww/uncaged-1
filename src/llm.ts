@@ -240,6 +240,7 @@ export class LlmClient {
       if (!response.tool_calls || response.tool_calls.length === 0) {
         const reply = response.content || '🤔 I had nothing to say.'
         messages.push({ role: 'assistant', content: reply })
+        console.log(`[agent] round=${round} → final answer (${reply.length} chars)`)
         return { reply, updatedMessages: messages }
       }
 
@@ -252,11 +253,17 @@ export class LlmClient {
 
       // Execute each tool call
       for (const tc of response.tool_calls) {
+        const args = typeof tc.function.arguments === 'string'
+          ? JSON.parse(tc.function.arguments)
+          : tc.function.arguments
+        console.log(`[agent] round=${round} tool=${tc.function.name} args=${JSON.stringify(args).slice(0, 200)}`)
         let result: string
         try {
           result = await this.executeTool(tc, sigil, memory)
+          console.log(`[agent] tool=${tc.function.name} result=${result.slice(0, 200)}`)
         } catch (e: any) {
           result = JSON.stringify({ error: e.message || 'Unknown error' })
+          console.error(`[agent] tool=${tc.function.name} error=${e.message}`)
         }
         messages.push({
           role: 'tool',
