@@ -79,12 +79,18 @@ async function executeBaton(
   try {
     const { reply } = await llm.agentLoop(messages, sigil, soul, memory, `baton:${baton.id}`)
 
-    // If spawn_task was called during the loop, the baton is already 'spawned'.
-    // Otherwise, it completed normally.
+    // Check if children were spawned during execution
+    // (spawn_task tool calls batonStore.spawnChildren which sets status to 'spawned')
     const current = await batonStore.load(batonId)
-    if (current && current.status === 'spawned') {
-      // Children were spawned — don't mark completed, wait for children
-      console.log(`[Baton] ${batonId} spawned children, waiting for completion`)
+    const children = await batonStore.loadChildren(batonId)
+
+    if (children.length > 0) {
+      // Children exist — this baton was broken down, wait for children
+      // Ensure status is 'spawned' (might have been set by spawnChildren already)
+      if (current && current.status !== 'spawned') {
+        await batonStore.markSpawned(batonId)
+      }
+      console.log(`[Baton] ${batonId} has ${children.length} children, waiting for completion`)
     } else {
       await batonStore.complete(batonId, reply)
       await maybeNotify(baton, reply, env)
