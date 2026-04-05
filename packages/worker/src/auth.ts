@@ -850,12 +850,53 @@ async function handleMagicLinkSend(request: Request, env: WorkerEnv): Promise<Re
   // Store in KV with 10-minute TTL
   await kv.put(`magic:${token}`, JSON.stringify({ userId, email, createdAt: Date.now() }), { expirationTtl: 600 })
 
-  return jsonOk({ 
-    ok: true, 
-    message: 'Magic link generated',
-    // MVP: return token so frontend can construct link (remove once email sending is added)
-    token,
-    link: `https://uncaged.shazhou.work/auth/magic/verify?token=${token}`,
+  // Send magic link email via MailChannels
+  const magicLink = `https://uncaged.shazhou.work/auth/magic/verify?token=${token}`
+
+  try {
+    const emailResponse = await fetch('https://api.mailchannels.net/tx/v1/send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        personalizations: [{
+          to: [{ email, name: displayName }],
+        }],
+        from: {
+          email: 'noreply@shazhou.work',
+          name: 'Uncaged',
+        },
+        subject: 'Your Uncaged Login Link',
+        content: [{
+          type: 'text/html',
+          value: `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
+              <h2 style="color: #1a1a1a; margin-bottom: 8px;">🔐 Login to Uncaged</h2>
+              <p style="color: #666; font-size: 15px;">Click the button below to log in. This link expires in 10 minutes.</p>
+              <a href="${magicLink}" style="display: inline-block; background: #fbbf24; color: #1a1a1a; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px; margin: 24px 0;">Log In</a>
+              <p style="color: #999; font-size: 13px; margin-top: 24px;">If you didn't request this, you can safely ignore this email.</p>
+              <p style="color: #ccc; font-size: 12px; margin-top: 32px;">— Uncaged (uncaged.shazhou.work)</p>
+            </div>
+          `,
+        }],
+      }),
+    })
+    
+    if (!emailResponse.ok) {
+      const errBody = await emailResponse.text()
+      console.error('[Auth] MailChannels send failed:', emailResponse.status, errBody)
+      // Don't fail the request — still return the link as fallback
+    }
+  } catch (err) {
+    console.error('[Auth] Email send error:', err)
+    // Don't fail — fallback to showing link
+  }
+
+  return jsonOk({
+    ok: true,
+    message: 'Login link sent to your email',
+    // Keep link in response for now as fallback (some email providers may block MailChannels)
+    // TODO: remove once email delivery is confirmed reliable
+    link: magicLink,
   })
 }
 

@@ -365,20 +365,27 @@ export function getLoginPageHTML(): string {
         
         const result = await response.json();
         
-        // For MVP: show the link directly since we're returning it in the response
-        if (result.link) {
-          const linkHtml = \`<p style="margin-bottom: 1rem;">登录链接已生成！点击下方链接登录：</p><a href="\${result.link}" style="color: #fbbf24; text-decoration: underline; word-break: break-all;">\${result.link}</a><p style="margin-top: 1rem; color: #9ca3af; font-size: 0.9rem;">链接10分钟内有效，仅可使用一次。</p>\`;
-          document.getElementById('loginView').innerHTML = \`
-            <div style="text-align: left; line-height: 1.5;">
-              \${linkHtml}
-              <button class="btn btn-secondary" onclick="location.reload()" style="margin-top: 1.5rem; width: 100%;">
-                ← 返回登录页面
-              </button>
-            </div>
-          \`;
-        } else {
-          showError('请检查你的邮箱，点击收到的登录链接');
-        }
+        // Show success message with fallback link
+        const successHtml = 
+          '<div style="text-align: center; line-height: 1.5;">' +
+            '<div style="color: #10b981; font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem;">' +
+              '✅ 登录链接已发送到 ' + email +
+            '</div>' +
+            '<p style="color: #9ca3af; font-size: 0.9rem; margin-bottom: 1.5rem;">' +
+              '请查收邮件并点击登录链接。如果没收到邮件，请检查垃圾邮件箱。' +
+            '</p>' +
+            (result.link ? 
+              '<div style="background: #1f2937; border: 1px solid #374151; border-radius: 10px; padding: 1rem; margin-bottom: 1.5rem;">' +
+                '<p style="color: #6b7280; font-size: 0.85rem; margin-bottom: 0.5rem;">没收到邮件？直接点击登录：</p>' +
+                '<a href="' + result.link + '" style="color: #fbbf24; text-decoration: underline; word-break: break-all; font-size: 0.9rem;">' + result.link + '</a>' +
+                '<p style="color: #6b7280; font-size: 0.8rem; margin-top: 0.5rem;">链接10分钟内有效，仅可使用一次</p>' +
+              '</div>' : '') +
+            '<button class="btn btn-secondary" onclick="location.reload()" style="width: 100%;">' +
+              '← 返回登录页面' +
+            '</button>' +
+          '</div>';
+        
+        document.getElementById('loginView').innerHTML = successHtml;
       } catch (e) {
         showError(e.message || '发送失败，请重试');
       } finally {
