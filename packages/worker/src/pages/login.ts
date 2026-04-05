@@ -111,6 +111,14 @@ export function getLoginPageHTML(): string {
         </svg>
         用 Google 登录
       </a>
+
+      <div class="divider">或</div>
+
+      <input type="email" class="input" id="magicEmailInput" placeholder="输入你的邮箱" maxlength="100" autocomplete="email" />
+      <button class="btn btn-secondary" id="magicLinkBtn" onclick="sendMagicLink()">
+        ✉️ 发送登录链接
+      </button>
+
       <div class="toggle-link">
         没有账号？<a onclick="showRegister()">注册</a>
       </div>
@@ -332,6 +340,52 @@ export function getLoginPageHTML(): string {
       }
     }
 
+    // ─── Magic Link Login ───
+    async function sendMagicLink() {
+      hideError();
+      const email = document.getElementById('magicEmailInput').value.trim().toLowerCase();
+      if (!email || !email.includes('@')) {
+        showError('请输入有效的邮箱地址');
+        document.getElementById('magicEmailInput').focus();
+        return;
+      }
+      
+      setLoading('magicLinkBtn', true);
+      try {
+        const response = await fetch('/auth/magic/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email }),
+        });
+        
+        if (!response.ok) {
+          const err = await response.json().catch(() => ({}));
+          throw new Error(err.error || '发送登录链接失败');
+        }
+        
+        const result = await response.json();
+        
+        // For MVP: show the link directly since we're returning it in the response
+        if (result.link) {
+          const linkHtml = \`<p style="margin-bottom: 1rem;">登录链接已生成！点击下方链接登录：</p><a href="\${result.link}" style="color: #fbbf24; text-decoration: underline; word-break: break-all;">\${result.link}</a><p style="margin-top: 1rem; color: #9ca3af; font-size: 0.9rem;">链接10分钟内有效，仅可使用一次。</p>\`;
+          document.getElementById('loginView').innerHTML = \`
+            <div style="text-align: left; line-height: 1.5;">
+              \${linkHtml}
+              <button class="btn btn-secondary" onclick="location.reload()" style="margin-top: 1.5rem; width: 100%;">
+                ← 返回登录页面
+              </button>
+            </div>
+          \`;
+        } else {
+          showError('请检查你的邮箱，点击收到的登录链接');
+        }
+      } catch (e) {
+        showError(e.message || '发送失败，请重试');
+      } finally {
+        setLoading('magicLinkBtn', false, '✉️ 发送登录链接');
+      }
+    }
+
     // ─── Auto-redirect if already logged in ───
     (function() {
       const token = localStorage.getItem('uncaged_access_token');
@@ -348,6 +402,11 @@ export function getLoginPageHTML(): string {
     // Enter key on displayName input triggers register
     document.getElementById('displayNameInput').addEventListener('keydown', function(e) {
       if (e.key === 'Enter') { e.preventDefault(); registerPasskey(); }
+    });
+    
+    // Enter key on magic email input triggers send magic link
+    document.getElementById('magicEmailInput').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); sendMagicLink(); }
     });
   </script>
 </body>

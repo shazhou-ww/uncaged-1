@@ -110,6 +110,14 @@ export async function handleAuthRoutes(
       return await handleGoogleCallback(request, env)
     }
 
+    // ─── Magic Link routes ───
+    if (pathname === '/auth/magic/send' && request.method === 'POST') {
+      return handleMagicLinkSend(request, env)
+    }
+    if (pathname === '/auth/magic/verify' && request.method === 'GET') {
+      return handleMagicLinkVerify(request, env)
+    }
+
     // ─── Session management ───
     if (pathname === '/auth/session' && request.method === 'GET') {
       return await handleSession(request, env)
@@ -793,6 +801,106 @@ async function handleLogout(request: Request, env: WorkerEnv): Promise<Response>
   }
 
   return jsonOk({ loggedOut: true })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Magic Link — Email-based authentication
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// POST /auth/magic/send
+async function handleMagicLinkSend(request: Request, env: WorkerEnv): Promise<Response> {
+  const kv = env.CHAT_KV
+  const db = env.MEMORY_DB
+  if (!kv || !db) return jsonError('Not configured', 503)
+
+  const body = await safeJsonBody<{ email?: string }>(request)
+  const email = body?.email?.trim().toLowerCase()
+  if (!email || !email.includes('@')) return jsonError('Valid email required', 400)
+
+  // Find or create user by email
+  let userId: string | null = null
+  let displayName = email.split('@')[0]
+
+  // Check credentials for this email (type=email or type=google)
+  const cred = await db.prepare(
+    "SELECT user_id FROM credentials WHERE external_id = ? AND type IN ('email', 'google') LIMIT 1"
+  ).bind(email).first<{ user_id: string }>()
+
+  if (cred) {
+    userId = cred.user_id
+    const user = await db.prepare("SELECT display_name FROM users WHERE id = ?").bind(userId).first<{ display_name: string }>()
+    if (user) displayName = user.display_name
+  } else {
+    // Create new user + email credential
+    userId = crypto.randomUUID()
+    const shortId = `u_${Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => 'abcdefghijklmnopqrstuvwxyz0123456789'[b % 36]).join('')}`
+    const slug = email.split('@')[0].replace(/[^a-z0-9-]/g, '-').slice(0, 30)
+    const now = Date.now()
+    
+    await db.batch([
+      db.prepare("INSERT INTO users (id, display_name, slug, short_id, created_at) VALUES (?, ?, ?, ?, ?)").bind(userId, displayName, slug, shortId, now),
+      db.prepare("INSERT INTO credentials (id, user_id, type, external_id, created_at) VALUES (?, ?, 'email', ?, ?)").bind(crypto.randomUUID(), userId, email, now),
+    ])
+  }
+
+  // Generate magic token
+  const tokenBytes = crypto.getRandomValues(new Uint8Array(32))
+  const token = Array.from(tokenBytes).map(b => b.toString(16).padStart(2, '0')).join('')
+  
+  // Store in KV with 10-minute TTL
+  await kv.put(`magic:${token}`, JSON.stringify({ userId, email, createdAt: Date.now() }), { expirationTtl: 600 })
+
+  return jsonOk({ 
+    ok: true, 
+    message: 'Magic link generated',
+    // MVP: return token so frontend can construct link (remove once email sending is added)
+    token,
+    link: `https://uncaged.shazhou.work/auth/magic/verify?token=${token}`,
+  })
+}
+
+// GET /auth/magic/verify?token=xxx
+async function handleMagicLinkVerify(request: Request, env: WorkerEnv): Promise<Response> {
+  const kv = env.CHAT_KV
+  const db = env.MEMORY_DB
+  if (!kv || !db) return jsonError('Not configured', 503)
+
+  const url = new URL(request.url)
+  const token = url.searchParams.get('token')
+  if (!token) return jsonError('Token required', 400)
+
+  // Look up magic token
+  const data = await kv.get(`magic:${token}`, 'json') as { userId: string; email: string } | null
+  if (!data) return jsonError('Invalid or expired link', 401)
+
+  // Delete token (one-time use)
+  await kv.delete(`magic:${token}`)
+
+  // Get user info
+  const user = await db.prepare("SELECT id, display_name, slug FROM users WHERE id = ?").bind(data.userId).first<{ id: string; display_name: string; slug: string }>()
+  if (!user) return jsonError('User not found', 404)
+
+  // Issue JWT tokens using the Auth class from core
+  const secret = env.SESSION_SECRET || env.SIGIL_DEPLOY_TOKEN
+  if (!secret) return jsonError('Auth not configured', 503)
+
+  // Import and use the Auth class from core
+  const { Auth } = await import('@uncaged/core/auth')
+  const auth = new Auth(secret, kv)
+  const tokens = await auth.issueTokens(user.id, user.display_name)
+  const cookies = auth.buildCookies(tokens)
+
+  // Redirect to home with cookies set
+  // Try to find an agent owned by this user for the redirect target
+  const agent = await db.prepare("SELECT slug FROM agents WHERE owner_id = ? LIMIT 1").bind(user.id).first<{ slug: string }>()
+  const redirectTo = agent ? `/${user.slug}/${agent.slug}/` : '/'
+
+  const headers = new Headers()
+  headers.append('Location', redirectTo)
+  headers.append('Set-Cookie', cookies.accessToken)
+  headers.append('Set-Cookie', cookies.refreshToken)
+
+  return new Response(null, { status: 302, headers })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
