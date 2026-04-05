@@ -1,9 +1,20 @@
 import { authedFetch } from './auth'
 
 export interface ChatMessage {
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant' | 'system' | 'tool'
   content: string | ContentPart[]
   timestamp?: number
+  tool_calls?: ToolCall[]
+  tool_call_id?: string
+}
+
+export interface ToolCall {
+  id: string
+  type: 'function'
+  function: {
+    name: string
+    arguments: string
+  }
 }
 
 export interface ContentPart {

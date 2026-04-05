@@ -507,12 +507,26 @@ async function routeRequest(
     const chatId = `web:${userId}`
     const messages = await chatStore.load(chatId)
     const history = messages
-      .filter(msg => msg.role !== 'system' && msg.role !== 'tool')
-      .map(msg => ({
-        role: msg.role,
-        content: typeof msg.content === 'string' ? msg.content : '[非文本消息]',
-        timestamp: Date.now(),
-      }))
+      .filter(msg => msg.role !== 'system')
+      .map(msg => {
+        const base = {
+          role: msg.role,
+          content: msg.content || '',
+          timestamp: Date.now(),
+        }
+        
+        // For assistant messages, include tool_calls if present
+        if (msg.role === 'assistant' && msg.tool_calls) {
+          return { ...base, tool_calls: msg.tool_calls }
+        }
+        
+        // For tool messages, include tool_call_id
+        if (msg.role === 'tool' && msg.tool_call_id) {
+          return { ...base, tool_call_id: msg.tool_call_id }
+        }
+        
+        return base
+      })
 
     return new Response(JSON.stringify({ history }), {
       headers: { 'Content-Type': 'application/json' },
