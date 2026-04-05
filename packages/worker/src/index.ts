@@ -23,6 +23,7 @@ import {
   handleCapabilityQuery, 
   handleCapabilityInspect 
 } from './sigil-routes.js'
+import { handleAuthRoutes } from './auth.js'
 
 // Unified environment — all channel secrets are optional
 export interface WorkerEnv extends Env {
@@ -390,7 +391,11 @@ export default {
     if (url.hostname === 'uncaged.shazhou.work') {
       // Check reserved prefixes first - these bypass agent routing
       if (isReservedPrefix(url.pathname)) {
-        // Reserved prefixes not implemented in Phase 2
+        // Handle /auth/* routes at platform level
+        if (url.pathname.startsWith('/auth/')) {
+          const authResponse = await handleAuthRoutes(request, env, url.pathname)
+          if (authResponse) return authResponse
+        }
         return new Response('Reserved path not implemented', { status: 404 })
       }
       

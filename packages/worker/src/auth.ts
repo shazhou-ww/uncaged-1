@@ -1,0 +1,1280 @@
+/**
+ * Auth handler — Platform-level authentication for Uncaged
+ *
+ * Routes:
+ *   POST /auth/passkey/register/options  — Get WebAuthn registration challenge
+ *   POST /auth/passkey/register/verify   — Verify registration and create credential
+ *   POST /auth/passkey/login/options     — Get WebAuthn login challenge
+ *   POST /auth/passkey/login/verify      — Verify login assertion
+ *   GET  /auth/google/login              — Redirect to Google OAuth
+ *   GET  /auth/google/callback           — Google OAuth callback
+ *   GET  /auth/session                   — Current session info
+ *   POST /auth/refresh                   — Refresh access token
+ *   POST /auth/logout                    — Logout (revoke refresh token)
+ *
+ * Passkey (WebAuthn) verification uses pure Web Crypto API — no npm dependencies.
+ * CBOR decoding is implemented inline (minimal, only what WebAuthn needs).
+ * JWT signing/verification uses HMAC-SHA256 via crypto.subtle.
+ *
+ * TODO: Import Auth class from @uncaged/core/auth once it exists, replacing
+ *       the inline JWT helpers below.
+ */
+
+import type { WorkerEnv } from './index.js'
+import { IdentityResolver } from '@uncaged/core/identity'
+
+// ─── Constants ───
+
+const RP_ID = 'uncaged.shazhou.work'
+const RP_NAME = 'Uncaged'
+const CHALLENGE_TTL = 60 // seconds
+const ACCESS_TOKEN_TTL = 60 * 60 // 1 hour
+const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60 // 30 days
+
+// ─── Types ───
+
+interface JWTPayload {
+  sub: string // user_id
+  iat: number
+  exp: number
+  type: 'access' | 'refresh'
+  displayName?: string
+}
+
+interface ChallengeData {
+  type: 'register' | 'login'
+  userId: string | null
+  displayName: string
+  tempUserId?: string // random user ID for new registrations
+}
+
+interface WebAuthnRegistrationCredential {
+  id: string // base64url credentialId
+  rawId: string // base64url
+  type: 'public-key'
+  response: {
+    attestationObject: string // base64url
+    clientDataJSON: string // base64url
+  }
+}
+
+interface WebAuthnLoginCredential {
+  id: string // base64url credentialId
+  rawId: string // base64url
+  type: 'public-key'
+  response: {
+    authenticatorData: string // base64url
+    clientDataJSON: string // base64url
+    signature: string // base64url
+    userHandle?: string // base64url
+  }
+}
+
+// ─── Main Handler ───
+
+export async function handleAuthRoutes(
+  request: Request,
+  env: WorkerEnv,
+  pathname: string,
+): Promise<Response | null> {
+  try {
+    // ─── Passkey routes ───
+    if (pathname === '/auth/passkey/register/options' && request.method === 'POST') {
+      return await handlePasskeyRegisterOptions(request, env)
+    }
+    if (pathname === '/auth/passkey/register/verify' && request.method === 'POST') {
+      return await handlePasskeyRegisterVerify(request, env)
+    }
+    if (pathname === '/auth/passkey/login/options' && request.method === 'POST') {
+      return await handlePasskeyLoginOptions(request, env)
+    }
+    if (pathname === '/auth/passkey/login/verify' && request.method === 'POST') {
+      return await handlePasskeyLoginVerify(request, env)
+    }
+
+    // ─── Google OAuth routes ───
+    if (pathname === '/auth/google/login' && request.method === 'GET') {
+      return handleGoogleLogin(request, env)
+    }
+    if (pathname === '/auth/google/callback' && request.method === 'GET') {
+      return await handleGoogleCallback(request, env)
+    }
+
+    // ─── Session management ───
+    if (pathname === '/auth/session' && request.method === 'GET') {
+      return await handleSession(request, env)
+    }
+    if (pathname === '/auth/refresh' && request.method === 'POST') {
+      return await handleRefresh(request, env)
+    }
+    if (pathname === '/auth/logout' && request.method === 'POST') {
+      return await handleLogout(request, env)
+    }
+
+    return null
+  } catch (err: any) {
+    console.error('[auth] unhandled error:', err)
+    return jsonError('Internal server error', 500)
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Passkey — Registration
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function handlePasskeyRegisterOptions(
+  request: Request,
+  env: WorkerEnv,
+): Promise<Response> {
+  const kv = env.CHAT_KV
+  const body = await safeJsonBody<{ displayName?: string }>(request)
+
+  // Check if there's an authenticated user (linking a passkey to existing account)
+  const existingUserId = await extractUserIdFromToken(request, env)
+  const displayName = body?.displayName || 'User'
+
+  // Generate challenge
+  const challenge = crypto.getRandomValues(new Uint8Array(32))
+  const challengeB64 = base64urlEncode(challenge)
+
+  // Generate a random user ID for new registrations
+  const tempUserId = existingUserId || crypto.randomUUID()
+  const userIdBytes = new TextEncoder().encode(tempUserId)
+
+  // Store challenge in KV
+  const challengeData: ChallengeData = {
+    type: 'register',
+    userId: existingUserId,
+    displayName,
+    tempUserId,
+  }
+  await kv.put(
+    `webauthn:challenge:${challengeB64}`,
+    JSON.stringify(challengeData),
+    { expirationTtl: CHALLENGE_TTL },
+  )
+
+  return jsonOk({
+    challenge: challengeB64,
+    rp: {
+      name: RP_NAME,
+      id: RP_ID,
+    },
+    user: {
+      id: base64urlEncode(userIdBytes),
+      name: displayName,
+      displayName,
+    },
+    pubKeyCredParams: [
+      { alg: -7, type: 'public-key' }, // ES256 (P-256)
+      { alg: -257, type: 'public-key' }, // RS256
+    ],
+    authenticatorSelection: {
+      residentKey: 'preferred',
+      userVerification: 'preferred',
+    },
+    timeout: 60000,
+    attestation: 'none',
+  })
+}
+
+async function handlePasskeyRegisterVerify(
+  request: Request,
+  env: WorkerEnv,
+): Promise<Response> {
+  const kv = env.CHAT_KV
+  const db = env.MEMORY_DB
+  if (!db) return jsonError('Database not configured', 503)
+
+  const body = await safeJsonBody<{ credential: WebAuthnRegistrationCredential }>(request)
+  if (!body?.credential) return jsonError('Missing credential', 400)
+
+  const { credential } = body
+
+  // 1. Parse clientDataJSON
+  const clientDataBytes = base64urlDecode(credential.response.clientDataJSON)
+  const clientData = JSON.parse(new TextDecoder().decode(clientDataBytes))
+
+  // Verify type
+  if (clientData.type !== 'webauthn.create') {
+    return jsonError('Invalid clientData type', 400)
+  }
+
+  // Verify origin
+  const expectedOrigins = [`https://${RP_ID}`]
+  if (!expectedOrigins.includes(clientData.origin)) {
+    return jsonError('Invalid origin', 400)
+  }
+
+  // 2. Verify challenge from KV
+  const challengeB64 = clientData.challenge
+  const challengeKey = `webauthn:challenge:${challengeB64}`
+  const challengeRaw = await kv.get(challengeKey)
+  if (!challengeRaw) {
+    return jsonError('Challenge expired or invalid', 400)
+  }
+  const challengeData: ChallengeData = JSON.parse(challengeRaw)
+  if (challengeData.type !== 'register') {
+    return jsonError('Challenge type mismatch', 400)
+  }
+
+  // 3. Parse attestationObject (CBOR)
+  const attestationBytes = base64urlDecode(credential.response.attestationObject)
+  const attestation = cborDecode(attestationBytes) as {
+    fmt: string
+    attStmt: Record<string, unknown>
+    authData: Uint8Array
+  }
+
+  const authData = attestation.authData
+  if (!(authData instanceof Uint8Array)) {
+    return jsonError('Invalid authData', 400)
+  }
+
+  // 4. Verify rpIdHash (bytes 0-31)
+  const rpIdHash = authData.slice(0, 32)
+  const expectedRpIdHash = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)),
+  )
+  if (!arrayBufferEqual(rpIdHash, expectedRpIdHash)) {
+    return jsonError('RP ID hash mismatch', 400)
+  }
+
+  // 5. Check flags (byte 32)
+  const flags = authData[32]
+  const userPresent = (flags & 0x01) !== 0
+  const attestedCredentialData = (flags & 0x40) !== 0
+  if (!userPresent) {
+    return jsonError('User presence flag not set', 400)
+  }
+  if (!attestedCredentialData) {
+    return jsonError('Attested credential data flag not set', 400)
+  }
+
+  // 6. Parse attested credential data
+  // bytes 33-36: counter (big-endian uint32)
+  const counter = new DataView(authData.buffer, authData.byteOffset + 33, 4).getUint32(0)
+
+  // bytes 37-52: AAGUID (16 bytes) — we skip it
+  let offset = 37 + 16 // 53
+
+  // credentialId length (2 bytes big-endian)
+  const credIdLen = new DataView(authData.buffer, authData.byteOffset + offset, 2).getUint16(0)
+  offset += 2
+
+  // credentialId
+  const credentialIdBytes = authData.slice(offset, offset + credIdLen)
+  const credentialIdB64 = base64urlEncode(credentialIdBytes)
+  offset += credIdLen
+
+  // COSE public key (CBOR encoded, remaining bytes)
+  const coseKeyBytes = authData.slice(offset)
+  const coseKey = cborDecode(coseKeyBytes) as Map<number, unknown>
+
+  // 7. Extract and import public key
+  const { cryptoKey, algorithmName, publicKeyBytes } = await importCoseKey(coseKey)
+
+  // 8. Create or link user via IdentityResolver
+  const identity = new IdentityResolver(db)
+  const existingUserId = challengeData.userId
+  let userId: string
+
+  if (existingUserId) {
+    // Linking passkey to existing user — just store credential
+    userId = existingUserId
+  } else {
+    // New user registration
+    // Use IdentityResolver to create the user with passkey credential
+    const resolved = await identity.resolve({
+      agentId: '__platform__',
+      authType: 'passkey',
+      externalId: credentialIdB64,
+      displayName: challengeData.displayName,
+      channelType: 'web',
+      channelExternalId: credentialIdB64,
+    })
+    userId = resolved.userId
+
+    // Update the credential with public key and metadata
+    await db
+      .prepare(
+        'UPDATE credentials SET public_key = ?, metadata = ? WHERE type = ? AND external_id = ?',
+      )
+      .bind(
+        publicKeyBytes as any,
+        JSON.stringify({
+          algorithm: algorithmName,
+          counter,
+          transports: [],
+          createdAt: Date.now(),
+        }),
+        'passkey',
+        credentialIdB64,
+      )
+      .run()
+
+    // Delete challenge from KV
+    await kv.delete(challengeKey)
+
+    // 9. Issue JWT tokens
+    const tokens = await issueTokens(userId, challengeData.displayName, env)
+
+    return jsonOk({
+      verified: true,
+      userId,
+      tokens,
+    })
+  }
+
+  // Linking to existing user — store credential directly
+  const credId = crypto.randomUUID()
+  await db
+    .prepare(
+      'INSERT INTO credentials (id, user_id, type, external_id, public_key, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    )
+    .bind(
+      credId,
+      userId,
+      'passkey',
+      credentialIdB64,
+      publicKeyBytes as any,
+      JSON.stringify({
+        algorithm: algorithmName,
+        counter,
+        transports: [],
+        createdAt: Date.now(),
+      }),
+      Date.now(),
+    )
+    .run()
+
+  // Delete challenge from KV
+  await kv.delete(challengeKey)
+
+  // Issue JWT tokens
+  const tokens = await issueTokens(userId, challengeData.displayName, env)
+
+  return jsonOk({
+    verified: true,
+    userId,
+    tokens,
+  })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Passkey — Login
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function handlePasskeyLoginOptions(
+  _request: Request,
+  env: WorkerEnv,
+): Promise<Response> {
+  const kv = env.CHAT_KV
+
+  // Generate challenge
+  const challenge = crypto.getRandomValues(new Uint8Array(32))
+  const challengeB64 = base64urlEncode(challenge)
+
+  await kv.put(
+    `webauthn:challenge:${challengeB64}`,
+    JSON.stringify({ type: 'login' }),
+    { expirationTtl: CHALLENGE_TTL },
+  )
+
+  return jsonOk({
+    challenge: challengeB64,
+    rpId: RP_ID,
+    userVerification: 'preferred',
+    timeout: 60000,
+  })
+}
+
+async function handlePasskeyLoginVerify(
+  request: Request,
+  env: WorkerEnv,
+): Promise<Response> {
+  const kv = env.CHAT_KV
+  const db = env.MEMORY_DB
+  if (!db) return jsonError('Database not configured', 503)
+
+  const body = await safeJsonBody<{ credential: WebAuthnLoginCredential }>(request)
+  if (!body?.credential) return jsonError('Missing credential', 400)
+
+  const { credential } = body
+
+  // 1. Parse clientDataJSON
+  const clientDataBytes = base64urlDecode(credential.response.clientDataJSON)
+  const clientData = JSON.parse(new TextDecoder().decode(clientDataBytes))
+
+  // Verify type
+  if (clientData.type !== 'webauthn.get') {
+    return jsonError('Invalid clientData type', 400)
+  }
+
+  // Verify origin
+  const expectedOrigins = [`https://${RP_ID}`]
+  if (!expectedOrigins.includes(clientData.origin)) {
+    return jsonError('Invalid origin', 400)
+  }
+
+  // 2. Verify challenge from KV
+  const challengeB64 = clientData.challenge
+  const challengeKey = `webauthn:challenge:${challengeB64}`
+  const challengeRaw = await kv.get(challengeKey)
+  if (!challengeRaw) {
+    return jsonError('Challenge expired or invalid', 400)
+  }
+  const challengeDataParsed = JSON.parse(challengeRaw)
+  if (challengeDataParsed.type !== 'login') {
+    return jsonError('Challenge type mismatch', 400)
+  }
+
+  // 3. Look up credential in DB
+  const credentialIdB64 = credential.id
+  const credRow = await db
+    .prepare(
+      'SELECT c.id, c.user_id, c.public_key, c.metadata, u.display_name FROM credentials c JOIN users u ON c.user_id = u.id WHERE c.type = ? AND c.external_id = ?',
+    )
+    .bind('passkey', credentialIdB64)
+    .first<{
+      id: string
+      user_id: string
+      public_key: ArrayBuffer
+      metadata: string
+      display_name: string
+    }>()
+
+  if (!credRow) {
+    return jsonError('Credential not found', 400)
+  }
+
+  const metadata = JSON.parse(credRow.metadata || '{}')
+  const storedCounter: number = metadata.counter || 0
+  const algorithmName: string = metadata.algorithm || 'ES256'
+
+  // 4. Parse authenticatorData
+  const authDataBytes = base64urlDecode(credential.response.authenticatorData)
+
+  // Verify rpIdHash (bytes 0-31)
+  const rpIdHash = authDataBytes.slice(0, 32)
+  const expectedRpIdHash = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)),
+  )
+  if (!arrayBufferEqual(rpIdHash, expectedRpIdHash)) {
+    return jsonError('RP ID hash mismatch', 400)
+  }
+
+  // Check flags
+  const flags = authDataBytes[32]
+  const userPresent = (flags & 0x01) !== 0
+  if (!userPresent) {
+    return jsonError('User presence flag not set', 400)
+  }
+
+  // Counter (bytes 33-36)
+  const counter = new DataView(
+    authDataBytes.buffer,
+    authDataBytes.byteOffset + 33,
+    4,
+  ).getUint32(0)
+
+  // 5. Verify counter (if the authenticator supports counters)
+  if (counter > 0 || storedCounter > 0) {
+    if (counter <= storedCounter) {
+      return jsonError('Counter replay detected — possible cloned authenticator', 400)
+    }
+  }
+
+  // 6. Verify signature
+  const signatureBytes = base64urlDecode(credential.response.signature)
+
+  // The signed data is: authenticatorData || SHA-256(clientDataJSON)
+  const clientDataHash = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', clientDataBytes),
+  )
+  const signedData = new Uint8Array(authDataBytes.length + clientDataHash.length)
+  signedData.set(authDataBytes)
+  signedData.set(clientDataHash, authDataBytes.length)
+
+  // Import the stored public key
+  const publicKeyBytes = new Uint8Array(credRow.public_key)
+  const cryptoKey = await importStoredPublicKey(publicKeyBytes, algorithmName)
+
+  const verifyAlgo = getVerifyAlgorithm(algorithmName)
+  let sigToVerify = signatureBytes
+
+  // For ECDSA, WebAuthn uses DER-encoded signatures, but Web Crypto expects raw (r||s)
+  if (algorithmName === 'ES256') {
+    sigToVerify = derToRaw(signatureBytes)
+  }
+
+  const valid = await crypto.subtle.verify(verifyAlgo, cryptoKey, sigToVerify, signedData)
+  if (!valid) {
+    return jsonError('Signature verification failed', 400)
+  }
+
+  // 7. Update counter in metadata
+  metadata.counter = counter
+  metadata.lastUsed = Date.now()
+  await db
+    .prepare('UPDATE credentials SET metadata = ? WHERE id = ?')
+    .bind(JSON.stringify(metadata), credRow.id)
+    .run()
+
+  // 8. Delete challenge from KV
+  await kv.delete(challengeKey)
+
+  // 9. Issue JWT tokens
+  const tokens = await issueTokens(credRow.user_id, credRow.display_name, env)
+
+  return jsonOk({
+    verified: true,
+    userId: credRow.user_id,
+    displayName: credRow.display_name,
+    tokens,
+  })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Google OAuth
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function handleGoogleLogin(_request: Request, env: WorkerEnv): Response {
+  if (!env.GOOGLE_CLIENT_ID) {
+    return jsonError('Google OAuth not configured', 503)
+  }
+
+  const callbackUrl = `https://${RP_ID}/auth/google/callback`
+  const state = base64urlEncode(crypto.getRandomValues(new Uint8Array(16)))
+
+  const redirectUrl =
+    `https://accounts.google.com/o/oauth2/v2/auth?` +
+    `client_id=${encodeURIComponent(env.GOOGLE_CLIENT_ID)}&` +
+    `redirect_uri=${encodeURIComponent(callbackUrl)}&` +
+    `scope=${encodeURIComponent('openid email profile')}&` +
+    `response_type=code&` +
+    `state=${state}`
+
+  return Response.redirect(redirectUrl, 302)
+}
+
+async function handleGoogleCallback(
+  request: Request,
+  env: WorkerEnv,
+): Promise<Response> {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    return jsonError('Google OAuth not configured', 503)
+  }
+
+  const db = env.MEMORY_DB
+  if (!db) return jsonError('Database not configured', 503)
+
+  const url = new URL(request.url)
+  const code = url.searchParams.get('code')
+  const error = url.searchParams.get('error')
+
+  if (error) {
+    return jsonError(`OAuth error: ${error}`, 400)
+  }
+  if (!code) {
+    return jsonError('Authorization code missing', 400)
+  }
+
+  const callbackUrl = `https://${RP_ID}/auth/google/callback`
+
+  // Exchange code for token
+  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      code,
+      client_id: env.GOOGLE_CLIENT_ID,
+      client_secret: env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: callbackUrl,
+      grant_type: 'authorization_code',
+    }),
+  })
+
+  if (!tokenResponse.ok) {
+    const errBody = await tokenResponse.text()
+    console.error('[auth/google] token exchange failed:', errBody)
+    return jsonError('Token exchange failed', 500)
+  }
+
+  const tokenData = (await tokenResponse.json()) as { access_token: string }
+
+  // Fetch user info
+  const userInfoResponse = await fetch(
+    'https://www.googleapis.com/oauth2/v2/userinfo',
+    {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` },
+    },
+  )
+
+  if (!userInfoResponse.ok) {
+    return jsonError('Failed to fetch user info', 500)
+  }
+
+  const userInfo = (await userInfoResponse.json()) as {
+    email: string
+    name: string
+    picture: string
+    sub: string
+  }
+
+  if (!userInfo.email) {
+    return jsonError('Missing email from Google', 400)
+  }
+
+  // Resolve identity using IdentityResolver
+  const identity = new IdentityResolver(db)
+  const resolved = await identity.resolve({
+    agentId: '__platform__',
+    authType: 'google',
+    externalId: userInfo.email,
+    displayName: userInfo.name || userInfo.email,
+    channelType: 'web',
+    channelExternalId: userInfo.email,
+  })
+
+  // Store Google profile picture in credential metadata if this is a new user
+  if (resolved.isNewUser && userInfo.picture) {
+    await db
+      .prepare(
+        'UPDATE credentials SET metadata = ? WHERE type = ? AND external_id = ?',
+      )
+      .bind(
+        JSON.stringify({ picture: userInfo.picture, googleSub: userInfo.sub }),
+        'google',
+        userInfo.email,
+      )
+      .run()
+  }
+
+  // Issue tokens
+  const tokens = await issueTokens(
+    resolved.userId,
+    userInfo.name || userInfo.email,
+    env,
+  )
+
+  // Return HTML that stores tokens and redirects
+  const html = `<!DOCTYPE html>
+<html>
+<head><title>Logging in...</title></head>
+<body>
+<script>
+  const tokens = ${JSON.stringify(tokens)};
+  localStorage.setItem('uncaged_access_token', tokens.accessToken);
+  localStorage.setItem('uncaged_refresh_token', tokens.refreshToken);
+  window.location.href = '/';
+</script>
+<noscript>
+  <p>Login successful. <a href="/">Click here to continue</a>.</p>
+</noscript>
+</body>
+</html>`
+
+  return new Response(html, {
+    status: 200,
+    headers: { 'Content-Type': 'text/html' },
+  })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Session Management
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function handleSession(request: Request, env: WorkerEnv): Promise<Response> {
+  const userId = await extractUserIdFromToken(request, env)
+  if (!userId) {
+    return jsonError('Not authenticated', 401)
+  }
+
+  const db = env.MEMORY_DB
+  if (!db) return jsonError('Database not configured', 503)
+
+  const user = await db
+    .prepare('SELECT id, display_name, slug, created_at FROM users WHERE id = ?')
+    .bind(userId)
+    .first<{ id: string; display_name: string; slug: string; created_at: number }>()
+
+  if (!user) {
+    return jsonError('User not found', 404)
+  }
+
+  // Fetch credentials for this user (without public_key for security)
+  const creds = await db
+    .prepare(
+      'SELECT type, external_id, created_at FROM credentials WHERE user_id = ?',
+    )
+    .bind(userId)
+    .all<{ type: string; external_id: string; created_at: number }>()
+
+  return jsonOk({
+    user: {
+      id: user.id,
+      displayName: user.display_name,
+      slug: user.slug,
+      createdAt: user.created_at,
+    },
+    credentials: creds.results.map((c: { type: string; external_id: string; created_at: number }) => ({
+      type: c.type,
+      externalId: c.type === 'passkey' ? c.external_id.slice(0, 8) + '...' : c.external_id,
+      createdAt: c.created_at,
+    })),
+  })
+}
+
+async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response> {
+  const body = await safeJsonBody<{ refreshToken: string }>(request)
+  if (!body?.refreshToken) {
+    return jsonError('Missing refreshToken', 400)
+  }
+
+  const kv = env.CHAT_KV
+
+  // Verify the refresh token
+  const payload = await verifyJwt(body.refreshToken, env)
+  if (!payload || payload.type !== 'refresh') {
+    return jsonError('Invalid or expired refresh token', 401)
+  }
+
+  // Check if token has been revoked
+  const revoked = await kv.get(`revoked:${body.refreshToken}`)
+  if (revoked) {
+    return jsonError('Token has been revoked', 401)
+  }
+
+  // Issue new access token (keep the same refresh token)
+  const accessToken = await signJwt(
+    {
+      sub: payload.sub,
+      type: 'access',
+      displayName: payload.displayName,
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL,
+    },
+    env,
+  )
+
+  return jsonOk({
+    accessToken,
+    expiresIn: ACCESS_TOKEN_TTL,
+  })
+}
+
+async function handleLogout(request: Request, env: WorkerEnv): Promise<Response> {
+  const body = await safeJsonBody<{ refreshToken?: string }>(request)
+  const kv = env.CHAT_KV
+
+  // Revoke refresh token if provided
+  if (body?.refreshToken) {
+    const payload = await verifyJwt(body.refreshToken, env)
+    if (payload && payload.type === 'refresh') {
+      // Store in KV as revoked until it would have expired
+      const ttl = payload.exp - Math.floor(Date.now() / 1000)
+      if (ttl > 0) {
+        await kv.put(`revoked:${body.refreshToken}`, '1', {
+          expirationTtl: ttl,
+        })
+      }
+    }
+  }
+
+  return jsonOk({ loggedOut: true })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JWT Helpers (inline HMAC-SHA256 — TODO: replace with @uncaged/core/auth)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function getJwtSecret(env: WorkerEnv): string {
+  // Use SESSION_SECRET if available, otherwise fall back to SIGIL_DEPLOY_TOKEN
+  return env.SESSION_SECRET || env.SIGIL_DEPLOY_TOKEN
+}
+
+async function getHmacKey(env: WorkerEnv): Promise<CryptoKey> {
+  const secret = getJwtSecret(env)
+  return crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign', 'verify'],
+  )
+}
+
+async function signJwt(payload: JWTPayload, env: WorkerEnv): Promise<string> {
+  const header = { alg: 'HS256', typ: 'JWT' }
+  const headerB64 = base64urlEncode(new TextEncoder().encode(JSON.stringify(header)))
+  const payloadB64 = base64urlEncode(new TextEncoder().encode(JSON.stringify(payload)))
+  const signingInput = `${headerB64}.${payloadB64}`
+
+  const key = await getHmacKey(env)
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signingInput))
+  const sigB64 = base64urlEncode(new Uint8Array(sig))
+
+  return `${signingInput}.${sigB64}`
+}
+
+async function verifyJwt(
+  token: string,
+  env: WorkerEnv,
+): Promise<JWTPayload | null> {
+  const parts = token.split('.')
+  if (parts.length !== 3) return null
+
+  const [headerB64, payloadB64, sigB64] = parts
+  const signingInput = `${headerB64}.${payloadB64}`
+
+  const key = await getHmacKey(env)
+  const sig = base64urlDecode(sigB64)
+  const valid = await crypto.subtle.verify(
+    'HMAC',
+    key,
+    sig,
+    new TextEncoder().encode(signingInput),
+  )
+  if (!valid) return null
+
+  const payload: JWTPayload = JSON.parse(
+    new TextDecoder().decode(base64urlDecode(payloadB64)),
+  )
+
+  // Check expiration
+  const now = Math.floor(Date.now() / 1000)
+  if (payload.exp && payload.exp < now) return null
+
+  return payload
+}
+
+async function issueTokens(
+  userId: string,
+  displayName: string,
+  env: WorkerEnv,
+): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+  const now = Math.floor(Date.now() / 1000)
+
+  const accessToken = await signJwt(
+    {
+      sub: userId,
+      type: 'access',
+      displayName,
+      iat: now,
+      exp: now + ACCESS_TOKEN_TTL,
+    },
+    env,
+  )
+
+  const refreshToken = await signJwt(
+    {
+      sub: userId,
+      type: 'refresh',
+      displayName,
+      iat: now,
+      exp: now + REFRESH_TOKEN_TTL,
+    },
+    env,
+  )
+
+  return { accessToken, refreshToken, expiresIn: ACCESS_TOKEN_TTL }
+}
+
+async function extractUserIdFromToken(
+  request: Request,
+  env: WorkerEnv,
+): Promise<string | null> {
+  const authHeader = request.headers.get('Authorization')
+  if (!authHeader?.startsWith('Bearer ')) return null
+
+  const token = authHeader.slice(7)
+  const payload = await verifyJwt(token, env)
+  if (!payload || payload.type !== 'access') return null
+
+  return payload.sub
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CBOR Decoder — Minimal, only what WebAuthn attestation/COSE needs
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function cborDecode(data: Uint8Array): unknown {
+  let offset = 0
+
+  function readUint8(): number {
+    return data[offset++]
+  }
+
+  function readUint16(): number {
+    const val = (data[offset] << 8) | data[offset + 1]
+    offset += 2
+    return val
+  }
+
+  function readUint32(): number {
+    const val =
+      ((data[offset] << 24) >>> 0) |
+      (data[offset + 1] << 16) |
+      (data[offset + 2] << 8) |
+      data[offset + 3]
+    offset += 4
+    return val >>> 0 // ensure unsigned
+  }
+
+  function readBytes(len: number): Uint8Array {
+    const slice = data.slice(offset, offset + len)
+    offset += len
+    return slice
+  }
+
+  function readArgument(additionalInfo: number): number {
+    if (additionalInfo < 24) return additionalInfo
+    if (additionalInfo === 24) return readUint8()
+    if (additionalInfo === 25) return readUint16()
+    if (additionalInfo === 26) return readUint32()
+    // 27 = uint64 — not needed for WebAuthn, but handle as best-effort
+    if (additionalInfo === 27) {
+      // Read 8 bytes as a number (loses precision for very large values)
+      const hi = readUint32()
+      const lo = readUint32()
+      return hi * 0x100000000 + lo
+    }
+    throw new Error(`CBOR: unsupported additional info ${additionalInfo}`)
+  }
+
+  function decode(): unknown {
+    const initial = readUint8()
+    const majorType = initial >> 5
+    const additionalInfo = initial & 0x1f
+
+    switch (majorType) {
+      case 0: // unsigned integer
+        return readArgument(additionalInfo)
+
+      case 1: // negative integer
+        return -1 - readArgument(additionalInfo)
+
+      case 2: { // byte string
+        const len = readArgument(additionalInfo)
+        return readBytes(len)
+      }
+
+      case 3: { // text string
+        const len = readArgument(additionalInfo)
+        const bytes = readBytes(len)
+        return new TextDecoder().decode(bytes)
+      }
+
+      case 4: { // array
+        const len = readArgument(additionalInfo)
+        const arr: unknown[] = []
+        for (let i = 0; i < len; i++) {
+          arr.push(decode())
+        }
+        return arr
+      }
+
+      case 5: { // map
+        const len = readArgument(additionalInfo)
+        const map = new Map<unknown, unknown>()
+        for (let i = 0; i < len; i++) {
+          const key = decode()
+          const value = decode()
+          map.set(key, value)
+        }
+        // Also return as plain object for string keys
+        const obj: Record<string, unknown> = {}
+        let hasStringKeys = false
+        for (const [k, v] of map) {
+          if (typeof k === 'string') {
+            obj[k] = v
+            hasStringKeys = true
+          }
+        }
+        // If all keys are strings, return plain object; otherwise return Map
+        if (hasStringKeys && map.size === Object.keys(obj).length) {
+          return obj
+        }
+        return map
+      }
+
+      case 7: { // simple values and floats
+        if (additionalInfo === 20) return false
+        if (additionalInfo === 21) return true
+        if (additionalInfo === 22) return null
+        if (additionalInfo === 23) return undefined
+        if (additionalInfo === 25) {
+          // float16 — skip 2 bytes, rarely used in WebAuthn
+          offset += 2
+          return 0
+        }
+        if (additionalInfo === 26) {
+          // float32
+          const buf = new DataView(data.buffer, data.byteOffset + offset, 4)
+          offset += 4
+          return buf.getFloat32(0)
+        }
+        if (additionalInfo === 27) {
+          // float64
+          const buf = new DataView(data.buffer, data.byteOffset + offset, 8)
+          offset += 8
+          return buf.getFloat64(0)
+        }
+        return additionalInfo
+      }
+
+      default:
+        throw new Error(`CBOR: unsupported major type ${majorType}`)
+    }
+  }
+
+  return decode()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COSE Key → Web Crypto Key
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function importCoseKey(
+  coseKey: Map<number, unknown> | Record<string, unknown>,
+): Promise<{ cryptoKey: CryptoKey; algorithmName: string; publicKeyBytes: Uint8Array }> {
+  // COSE key parameters:
+  //  1 = kty (key type)
+  //  3 = alg (algorithm)
+  // -1 = crv (curve, for EC)
+  // -2 = x (x coordinate, for EC)
+  // -3 = y (y coordinate, for EC)
+  // -1 = n (modulus, for RSA)
+  // -2 = e (exponent, for RSA)
+
+  const get = (key: number): unknown => {
+    if (coseKey instanceof Map) return coseKey.get(key)
+    return (coseKey as any)[key]
+  }
+
+  const kty = get(1) as number
+  const alg = get(3) as number
+
+  if (kty === 2 && alg === -7) {
+    // EC2 key, ES256 (P-256)
+    const x = get(-2) as Uint8Array
+    const y = get(-3) as Uint8Array
+
+    if (!x || !y || x.length !== 32 || y.length !== 32) {
+      throw new Error('Invalid EC2 key coordinates')
+    }
+
+    // Build uncompressed point: 0x04 || x || y
+    const publicKeyBytes = new Uint8Array(65)
+    publicKeyBytes[0] = 0x04
+    publicKeyBytes.set(x, 1)
+    publicKeyBytes.set(y, 33)
+
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      publicKeyBytes,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      true,
+      ['verify'],
+    )
+
+    return { cryptoKey, algorithmName: 'ES256', publicKeyBytes }
+  }
+
+  if (kty === 3 && alg === -257) {
+    // RSA key, RS256
+    const n = get(-1) as Uint8Array
+    const e = get(-2) as Uint8Array
+
+    if (!n || !e) {
+      throw new Error('Invalid RSA key parameters')
+    }
+
+    // Build JWK for import
+    const jwk: JsonWebKey = {
+      kty: 'RSA',
+      alg: 'RS256',
+      n: base64urlEncode(n),
+      e: base64urlEncode(e),
+      ext: true,
+    }
+
+    const cryptoKey = await crypto.subtle.importKey(
+      'jwk',
+      jwk as any,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      true,
+      ['verify'],
+    )
+
+    // Export as SPKI for storage
+    const spki = new Uint8Array(
+      await crypto.subtle.exportKey('spki', cryptoKey) as ArrayBuffer,
+    )
+
+    return { cryptoKey, algorithmName: 'RS256', publicKeyBytes: spki }
+  }
+
+  throw new Error(`Unsupported COSE key type: kty=${kty}, alg=${alg}`)
+}
+
+async function importStoredPublicKey(
+  publicKeyBytes: Uint8Array,
+  algorithmName: string,
+): Promise<CryptoKey> {
+  if (algorithmName === 'ES256') {
+    // Stored as uncompressed point (65 bytes: 0x04 || x || y)
+    return crypto.subtle.importKey(
+      'raw',
+      publicKeyBytes,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify'],
+    )
+  }
+
+  if (algorithmName === 'RS256') {
+    // Stored as SPKI
+    return crypto.subtle.importKey(
+      'spki',
+      publicKeyBytes,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['verify'],
+    )
+  }
+
+  throw new Error(`Unsupported algorithm: ${algorithmName}`)
+}
+
+function getVerifyAlgorithm(
+  algorithmName: string,
+): { name: string; hash?: string } {
+  if (algorithmName === 'ES256') {
+    return { name: 'ECDSA', hash: 'SHA-256' }
+  }
+  if (algorithmName === 'RS256') {
+    return { name: 'RSASSA-PKCS1-v1_5' }
+  }
+  throw new Error(`Unsupported algorithm: ${algorithmName}`)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DER → Raw ECDSA Signature Conversion
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Convert a DER-encoded ECDSA signature to raw format (r || s).
+ * WebAuthn returns DER, but Web Crypto expects raw.
+ *
+ * DER structure:
+ *   SEQUENCE { INTEGER r, INTEGER s }
+ *   30 <len> 02 <rlen> <r> 02 <slen> <s>
+ */
+function derToRaw(derSig: Uint8Array): Uint8Array {
+  // Validate SEQUENCE tag
+  if (derSig[0] !== 0x30) {
+    throw new Error('Invalid DER signature: expected SEQUENCE tag')
+  }
+
+  let offset = 2 // skip SEQUENCE tag and length
+
+  // Handle multi-byte length
+  if (derSig[1] & 0x80) {
+    const lenBytes = derSig[1] & 0x7f
+    offset = 2 + lenBytes
+  }
+
+  // Parse r
+  if (derSig[offset] !== 0x02) {
+    throw new Error('Invalid DER signature: expected INTEGER tag for r')
+  }
+  offset++
+  const rLen = derSig[offset++]
+  let rBytes = derSig.slice(offset, offset + rLen)
+  offset += rLen
+
+  // Parse s
+  if (derSig[offset] !== 0x02) {
+    throw new Error('Invalid DER signature: expected INTEGER tag for s')
+  }
+  offset++
+  const sLen = derSig[offset++]
+  let sBytes = derSig.slice(offset, offset + sLen)
+
+  // Remove leading zero byte if present (DER encodes as signed, but r/s are unsigned)
+  if (rBytes.length === 33 && rBytes[0] === 0x00) rBytes = rBytes.slice(1)
+  if (sBytes.length === 33 && sBytes[0] === 0x00) sBytes = sBytes.slice(1)
+
+  // Pad to 32 bytes each (P-256)
+  const raw = new Uint8Array(64)
+  raw.set(rBytes, 32 - rBytes.length)
+  raw.set(sBytes, 64 - sBytes.length)
+
+  return raw
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Base64url Encoding/Decoding
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function base64urlEncode(data: Uint8Array): string {
+  let binary = ''
+  for (let i = 0; i < data.length; i++) {
+    binary += String.fromCharCode(data[i])
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function base64urlDecode(str: string): Uint8Array {
+  // Add padding
+  const padded = str + '='.repeat((4 - (str.length % 4)) % 4)
+  const base64 = padded.replace(/-/g, '+').replace(/_/g, '/')
+  const binary = atob(base64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Utility Helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function arrayBufferEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
+function jsonOk(data: unknown): Response {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    },
+  })
+}
+
+function jsonError(message: string, status: number): Response {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    },
+  })
+}
+
+async function safeJsonBody<T>(request: Request): Promise<T | null> {
+  try {
+    return (await request.json()) as T
+  } catch {
+    return null
+  }
+}
