@@ -543,7 +543,11 @@ async function routeRequest(
         const { reply, updatedMessages } = await llm.agentLoopStream(
           messages, sigil, soul, memory, memorySessionId,
           (event) => {
-            writer.write(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+            try {
+              writer.write(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+            } catch (writeError: any) {
+              console.error('[chat stream] write error:', writeError?.message, writeError?.stack)
+            }
           }
         )
 
@@ -554,7 +558,7 @@ async function routeRequest(
           memory.store(reply, 'assistant', memorySessionId),
         ])
       } catch (e: any) {
-        console.error('[chat stream] error:', e)
+        console.error('[chat stream] error:', e?.message, e?.stack)
         writer.write(encoder.encode(`data: ${JSON.stringify({ 
           type: 'error', 
           message: '抱歉，遇到了问题，请稍后重试 😥' 

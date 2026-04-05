@@ -308,6 +308,8 @@ export class LlmClient {
     console.log(`[Pipeline] model=${activeModel} temp=${activeTemp} msgs=${messages.length}`)
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      console.log(`[agentLoopStream] round=${round} starting, msgs=${messages.length}`)
+      
       // Derive dynamic tools from chat history (skip for vision models)
       const allTools = isVisionModel ? [] : [
         ...STATIC_TOOLS,
@@ -324,6 +326,8 @@ export class LlmClient {
         isVisionModel,
         (token) => onEvent({ type: 'token', text: token })
       )
+      
+      console.log(`[agentLoopStream] round=${round} response: content=${response.content?.length || 0}, tool_calls=${response.tool_calls?.length || 0}`)
 
       // No tool calls → final answer
       if (!response.tool_calls || response.tool_calls.length === 0) {
@@ -627,6 +631,8 @@ export class LlmClient {
       function?: { name?: string; arguments?: string }
     }>()
 
+    let finished = false // Flag to control outer while loop
+    
     try {
       while (true) {
         const { done, value } = await reader.read()
@@ -648,6 +654,12 @@ export class LlmClient {
               const chunk = JSON.parse(jsonStr)
               const delta = chunk.choices?.[0]?.delta
               if (!delta) continue
+
+              // Handle DashScope thinking tokens (ignore reasoning_content)
+              if (delta.reasoning_content) {
+                // DashScope thinking tokens - ignore, don't forward to user
+                continue
+              }
 
               // Handle text content tokens
               if (delta.content) {
@@ -702,13 +714,18 @@ export class LlmClient {
                   }))
                   .filter(tc => tc.function.name) // Only include valid tool calls
 
-                break
+                finished = true
+                break // exits inner for loop
               }
+              // Handle finish_reason: null (intermediate chunks) - continue processing
             } catch (e) {
               console.warn('[Stream] Failed to parse chunk:', jsonStr, e)
             }
           }
         }
+        
+        // Exit outer while loop if finished
+        if (finished) break
       }
     } finally {
       reader.releaseLock()

@@ -92,7 +92,8 @@ function renderContent(content: string | ContentPart[], toolCalls?: ToolCallType
       try {
         parsedArgs = JSON.parse(toolCall.function.arguments)
       } catch {
-        parsedArgs = { arguments: toolCall.function.arguments }
+        // If JSON parsing fails, create a simple object with the raw arguments
+        parsedArgs = { raw_arguments: toolCall.function.arguments }
       }
       
       elements.push(
