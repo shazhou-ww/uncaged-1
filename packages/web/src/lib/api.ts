@@ -94,3 +94,42 @@ export async function loadHistory(
 export async function clearHistory(basePath: string): Promise<void> {
   await authedFetch(`${basePath}/api/clear`, { method: 'POST' })
 }
+
+// ── Unified Tool Interaction ──────────────────────────────────────────
+
+export interface ToolSearchResult {
+  slug: string
+  name: string
+  description: string
+  icon?: string
+  agentSlug: string
+  agentName: string
+  inputSchema?: Record<string, unknown>
+}
+
+export async function searchCapabilities(
+  ownerPath: string,
+  query: string,
+  limit: number = 5,
+): Promise<ToolSearchResult[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) })
+  const r = await authedFetch(`${ownerPath}/api/v1/capabilities/search?${params}`)
+  if (!r.ok) return []
+  const data = await r.json()
+  return data.results ?? data ?? []
+}
+
+export async function invokeToolDirect(
+  basePath: string,
+  toolSlug: string,
+  args: Record<string, unknown>,
+): Promise<{ success: boolean; result?: unknown; error?: string }> {
+  const r = await authedFetch(`${basePath}/api/v1/tools/${toolSlug}/invoke`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ args }),
+  })
+  const data = await r.json()
+  if (!r.ok) return { success: false, error: data.error ?? 'Invoke failed' }
+  return { success: true, ...data }
+}

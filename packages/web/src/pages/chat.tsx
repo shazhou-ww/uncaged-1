@@ -9,6 +9,7 @@ import { useChat } from '../hooks/use-chat'
 export function ChatPage() {
   const { owner, agent } = useParams<{ owner: string; agent: string }>()
   const basePath = `/${owner}/${agent}`
+  const ownerPath = `/${owner}`
 
   return (
     <AuthGuard>
@@ -16,6 +17,7 @@ export function ChatPage() {
         <ChatPageInner
           agentName={agent || ''}
           basePath={basePath}
+          ownerPath={ownerPath}
           user={user}
           logout={logout}
         />
@@ -27,15 +29,17 @@ export function ChatPage() {
 function ChatPageInner({
   agentName,
   basePath,
+  ownerPath,
   user,
   logout,
 }: {
   agentName: string
   basePath: string
+  ownerPath: string
   user: { id: string; displayName: string; slug: string | null; createdAt: number }
   logout: () => Promise<void>
 }) {
-  const { messages, loading, sending, sendMessage } = useChat(basePath)
+  const { messages, loading, sending, sendMessage, addToolResult } = useChat(basePath)
 
   return (
     <motion.div
@@ -46,7 +50,13 @@ function ChatPageInner({
     >
       <Header agentName={agentName} user={user} onLogout={logout} />
       <MessageList messages={messages} loading={loading} sending={sending} />
-      <ChatInput onSend={sendMessage} disabled={sending} />
+      <ChatInput
+        onSend={sendMessage}
+        disabled={sending}
+        ownerPath={ownerPath}
+        basePath={basePath}
+        addToolResult={addToolResult}
+      />
     </motion.div>
   )
 }

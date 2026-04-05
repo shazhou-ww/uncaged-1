@@ -1,6 +1,7 @@
 import { motion } from 'motion/react'
 import { cn } from '../../lib/utils'
 import { ToolCall } from './tool-call'
+import { ToolResultCard } from './tool-result-card'
 import type { ChatMessage, ContentPart, ToolCall as ToolCallType } from '../../lib/api'
 
 interface MessageBubbleProps {
@@ -115,6 +116,44 @@ export function MessageBubble({ message, index = 0 }: MessageBubbleProps) {
 
   // Tool messages should be rendered differently
   if (isTool) {
+    // Check if this is a direct-invoke result
+    let directInvoke: { toolSlug: string; success: boolean; result: unknown } | null = null
+    if (typeof message.content === 'string') {
+      try {
+        const parsed = JSON.parse(message.content)
+        if (parsed._directInvoke) {
+          directInvoke = parsed
+        }
+      } catch { /* not JSON, render normally */ }
+    }
+
+    if (directInvoke) {
+      return (
+        <motion.div
+          className="flex gap-2.5 max-w-[85%] md:max-w-[75%] self-start"
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{
+            duration: 0.4,
+            delay: Math.min(index * 0.05, 0.3),
+            ease: [0.25, 0.46, 0.45, 0.94],
+          }}
+        >
+          <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xl bg-white/[0.05] border border-white/[0.06]">
+            🔧
+          </div>
+          <div className="flex flex-col gap-0.5 items-start flex-1">
+            <ToolResultCard
+              toolSlug={directInvoke.toolSlug}
+              result={directInvoke.result}
+              success={directInvoke.success}
+              timestamp={message.timestamp}
+            />
+          </div>
+        </motion.div>
+      )
+    }
+
     return (
       <motion.div
         className="flex gap-2.5 max-w-[85%] md:max-w-[75%] self-start"
