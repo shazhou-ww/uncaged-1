@@ -927,17 +927,6 @@ async function handleMagicLinkSend(request: Request, env: WorkerEnv): Promise<Re
   // Send magic link email via Resend
   const magicLink = `https://${getRpId(env)}/auth/magic/verify?token=${token}`
 
-  // Auto-login for whitelisted emails (bypass email sending)
-  const autoLoginEmails = new Set(['shazhou.ww@gmail.com'])
-  if (autoLoginEmails.has(email)) {
-    return jsonOk({
-      ok: true,
-      message: 'Auto-login enabled',
-      autoLogin: true,
-      link: magicLink,
-    })
-  }
-
   if (!env.RESEND_API_KEY) {
     console.warn('[Auth] RESEND_API_KEY not set, returning link as fallback')
     return jsonOk({ ok: true, message: 'Email not configured, use link directly', link: magicLink })

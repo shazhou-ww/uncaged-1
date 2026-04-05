@@ -35,12 +35,6 @@ export function MagicLink({ onError }: MagicLinkProps) {
 
       const data = await r.json()
 
-      // Auto-login: whitelisted email, redirect directly
-      if (data.autoLogin && data.link) {
-        window.location.href = data.link
-        return
-      }
-
       setSent(true)
     } catch {
       onError('网络错误，请重试')
