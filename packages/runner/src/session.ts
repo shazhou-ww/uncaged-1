@@ -74,6 +74,7 @@ export class ShellSession {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: process.env,
+        detached: process.platform !== 'win32', // create process group on unix
       })
     } catch (err) {
       callbacks.onError(`Failed to spawn process: ${err instanceof Error ? err.message : String(err)}`)
@@ -152,12 +153,21 @@ export class ShellSession {
   kill(): void {
     if (this.process) {
       try {
-        this.process.kill('SIGTERM')
+        // Kill entire process group on unix (handles shell children)
+        if (this.process.pid && process.platform !== 'win32') {
+          process.kill(-this.process.pid, 'SIGTERM')
+        } else {
+          this.process.kill('SIGTERM')
+        }
         // Force kill after 2s if still running
         setTimeout(() => {
           if (this.process) {
             try {
-              this.process.kill('SIGKILL')
+              if (this.process.pid && process.platform !== 'win32') {
+                process.kill(-this.process.pid, 'SIGKILL')
+              } else {
+                this.process.kill('SIGKILL')
+              }
             } catch {
               // already dead
             }

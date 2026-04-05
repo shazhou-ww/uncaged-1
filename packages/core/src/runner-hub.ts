@@ -26,6 +26,8 @@ interface PendingExec {
   stderr: string
 }
 
+const MAX_OUTPUT = 1_048_576 // 1MB per stream (stdout/stderr)
+
 export class RunnerHub implements DurableObject {
   private runners = new Map<string, RunnerConnection>()
   private pending = new Map<string, PendingExec>()
@@ -178,8 +180,14 @@ export class RunnerHub implements DurableObject {
       case 'stdout': {
         const id = data.id as string
         const pending = this.pending.get(id)
-        if (pending) {
-          pending.stdout += data.data as string
+        if (pending && pending.stdout.length < MAX_OUTPUT) {
+          const chunk = data.data as string
+          if (pending.stdout.length + chunk.length > MAX_OUTPUT) {
+            pending.stdout += chunk.slice(0, MAX_OUTPUT - pending.stdout.length)
+            pending.stdout += '\n[output truncated at 1MB]'
+          } else {
+            pending.stdout += chunk
+          }
         }
         break
       }
@@ -187,8 +195,14 @@ export class RunnerHub implements DurableObject {
       case 'stderr': {
         const id = data.id as string
         const pending = this.pending.get(id)
-        if (pending) {
-          pending.stderr += data.data as string
+        if (pending && pending.stderr.length < MAX_OUTPUT) {
+          const chunk = data.data as string
+          if (pending.stderr.length + chunk.length > MAX_OUTPUT) {
+            pending.stderr += chunk.slice(0, MAX_OUTPUT - pending.stderr.length)
+            pending.stderr += '\n[output truncated at 1MB]'
+          } else {
+            pending.stderr += chunk
+          }
         }
         break
       }
@@ -243,9 +257,9 @@ export class RunnerHub implements DurableObject {
   }
 
   private pickRunner(): string | null {
-    // Simple: pick the first connected runner
-    // TODO: tag-based selection, load balancing
-    const first = this.runners.keys().next()
-    return first.done ? null : first.value
+    const labels = Array.from(this.runners.keys())
+    if (labels.length === 0) return null
+    // Random selection among connected runners
+    return labels[Math.floor(Math.random() * labels.length)]
   }
 }
