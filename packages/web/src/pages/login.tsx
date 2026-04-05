@@ -4,7 +4,6 @@ import { Card, CardHeader, CardContent } from '../components/ui/card'
 import { PasskeyLogin } from '../components/auth/passkey-login'
 import { PasskeyRegister } from '../components/auth/passkey-register'
 import { GoogleLogin } from '../components/auth/google-login'
-import { MagicLink } from '../components/auth/magic-link'
 
 export function LoginPage() {
   const [view, setView] = useState<'login' | 'register'>('login')
@@ -106,14 +105,6 @@ export function LoginPage() {
                 >
                   <PasskeyLogin onError={handleError} onSuccess={handleSuccess} />
                   <GoogleLogin />
-
-                  <div className="flex items-center gap-4 text-text-4 text-sm">
-                    <div className="flex-1 border-t border-white/[0.06]" />
-                    <span>或</span>
-                    <div className="flex-1 border-t border-white/[0.06]" />
-                  </div>
-
-                  <MagicLink onError={handleError} />
 
                   <div className="flex items-center gap-4 text-text-4 text-sm mt-2">
                     <div className="flex-1 border-t border-white/[0.06]" />
