@@ -10,13 +10,23 @@
  * Messages are sent to /:owner/:agent/api/chat
  */
 
+/** Escape HTML special characters to prevent XSS */
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 export function getChatPageHTML(
   agentSlug: string,
   ownerSlug: string,
   agentDisplayName?: string,
 ): string {
-  const displayName = agentDisplayName || agentSlug
-  const basePath = `/${ownerSlug}/${agentSlug}`
+  const displayName = escapeHtml(agentDisplayName || agentSlug)
+  const basePath = `/${escapeHtml(ownerSlug)}/${escapeHtml(agentSlug)}`
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">

@@ -1,5 +1,7 @@
 /**
  * PWA Manifest generator — dynamic per-agent manifest.json
+ *
+ * JSON.stringify handles escaping automatically, so no XSS risk here.
  */
 
 export function getManifestJSON(
