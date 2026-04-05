@@ -24,6 +24,10 @@ import {
   handleCapabilityInspect 
 } from './sigil-routes.js'
 import { handleAuthRoutes } from './auth.js'
+import { getLoginPageHTML } from './pages/login.js'
+import { getLandingPageHTML } from './pages/landing.js'
+import { getChatPageHTML } from './pages/chat.js'
+import { getManifestJSON } from './pages/manifest.js'
 
 // Unified environment — all channel secrets are optional
 export interface WorkerEnv extends Env {
@@ -357,12 +361,29 @@ async function routeRequest(
     return handleTelegramRoutes(request, env, clients, instanceId, ctx)
   }
 
+  // ─── New PWA pages (JWT auth) ───
+  if (pathname === '/' && request.method === 'GET') {
+    const agentDisplayName = routingInfo?.agentId || instanceId
+    const ownerSlug = routingInfo?.ownerSlug || ''
+    return new Response(
+      getChatPageHTML(instanceId, ownerSlug, agentDisplayName),
+      { headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' } },
+    )
+  }
+  if (pathname === '/manifest.json' && request.method === 'GET') {
+    const agentDisplayName = routingInfo?.agentId || instanceId
+    const ownerSlug = routingInfo?.ownerSlug || ''
+    return new Response(
+      getManifestJSON(ownerSlug, instanceId, agentDisplayName),
+      { headers: { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'public, max-age=3600' } },
+    )
+  }
+
   // ─── Web channel (OAuth + UI + API) ───
   const webEnabled = env.GOOGLE_CLIENT_ID && isWebInstance(env, instanceId)
   if (
     pathname.startsWith('/auth/') ||
-    pathname.startsWith('/api/') ||
-    (pathname === '/' && request.method === 'GET' && webEnabled)
+    pathname.startsWith('/api/')
   ) {
     if (!webEnabled) {
       return new Response('Web channel not configured for this instance', { status: 404 })
@@ -389,9 +410,22 @@ export default {
     
     // Handle path-based routing for uncaged.shazhou.work
     if (url.hostname === 'uncaged.shazhou.work') {
+      // ─── Platform root: landing page ───
+      if (url.pathname === '/' && request.method === 'GET') {
+        return new Response(getLandingPageHTML(), {
+          headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' },
+        })
+      }
+
       // Check reserved prefixes first - these bypass agent routing
       if (isReservedPrefix(url.pathname)) {
-        // Handle /auth/* routes at platform level
+        // Serve login page at GET /auth/login
+        if (url.pathname === '/auth/login' && request.method === 'GET') {
+          return new Response(getLoginPageHTML(), {
+            headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' },
+          })
+        }
+        // Handle /auth/* API routes at platform level
         if (url.pathname.startsWith('/auth/')) {
           const authResponse = await handleAuthRoutes(request, env, url.pathname)
           if (authResponse) return authResponse
