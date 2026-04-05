@@ -24,6 +24,9 @@ import {
   handleCapabilityInspect 
 } from './sigil-routes.js'
 
+// Re-export RunnerHub so wrangler can find the Durable Object class
+export { RunnerHub } from '@uncaged/core/runner-hub'
+
 // Unified environment — all channel secrets are optional
 export interface WorkerEnv extends Env {
   // Telegram channel (optional)
@@ -46,6 +49,13 @@ export interface UserSession {
   name: string
   picture: string
   created_at: number
+}
+
+/** SHA-256 hash using Web Crypto (available in CF Workers) */
+async function sha256(text: string): Promise<string> {
+  const data = new TextEncoder().encode(text)
+  const hash = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
 /** Check if this instance has web channel enabled */
@@ -252,6 +262,13 @@ function buildClients(env: WorkerEnv, instanceId: string) {
     env.LLM_BASE_URL || undefined,
   )
   llm.a2aToken = env.A2A_TOKEN
+
+  // Wire up RunnerHub DO stub if binding is available
+  if (env.RUNNER_HUB) {
+    const hubId = env.RUNNER_HUB.idFromName(instanceId)
+    llm.runnerHub = env.RUNNER_HUB.get(hubId)
+  }
+
   const chatStore = new ChatStore(env.CHAT_KV)
   const soul = new Soul(env.CHAT_KV, instanceId)
   const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId, env.MEMORY_DB)
@@ -335,6 +352,51 @@ async function routeRequest(
   // For agent-specific routes, instanceId is required
   if (!instanceId) {
     return new Response('Invalid routing context', { status: 400 })
+  }
+
+  // ─── Runner WebSocket ───
+  // Route: /runner/ws — WebSocket upgrade for Runner clients
+  if (pathname === '/runner/ws' && request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
+    if (!env.RUNNER_HUB || !env.MEMORY_DB) {
+      return new Response('Runner not configured', { status: 503 })
+    }
+
+    // Bearer token authentication
+    const auth = request.headers.get('Authorization')
+    if (!auth?.startsWith('Bearer ')) {
+      return new Response('Unauthorized', { status: 401 })
+    }
+    const token = auth.slice(7).trim()
+    const tokenHash = await sha256(token)
+
+    // Look up token in D1
+    const row = await env.MEMORY_DB.prepare(
+      'SELECT agent_id, label FROM runner_tokens WHERE token_hash = ?'
+    ).bind(tokenHash).first<{ agent_id: string; label: string }>()
+
+    if (!row) {
+      return new Response('Invalid runner token', { status: 403 })
+    }
+
+    // Update last_seen_at (fire-and-forget)
+    ctx.waitUntil(
+      env.MEMORY_DB.prepare(
+        'UPDATE runner_tokens SET last_seen_at = ? WHERE token_hash = ?'
+      ).bind(Date.now(), tokenHash).run()
+    )
+
+    // Forward to RunnerHub DO (keyed by agent_id)
+    const hubId = env.RUNNER_HUB.idFromName(row.agent_id)
+    const hub = env.RUNNER_HUB.get(hubId)
+
+    // Pass label + tags through query params
+    const reqUrl = new URL(request.url)
+    const label = reqUrl.searchParams.get('label') || row.label
+    const tags = reqUrl.searchParams.get('tags') || ''
+
+    return hub.fetch(`https://runner-hub/connect?label=${encodeURIComponent(label)}&tags=${encodeURIComponent(tags)}`, {
+      headers: request.headers,
+    })
   }
 
   // ─── Telegram channel ───

@@ -25,6 +25,7 @@ import {
   type DistillKnowledgeArgs,
   type RecallKnowledgeArgs
 } from './tools/distill-knowledge.js'
+import { execTool, runnerListTool, handleExec, handleRunnerList, type ExecArgs } from './tools/exec.js'
 
 interface ToolDef {
   type: 'function'
@@ -230,6 +231,7 @@ export class LlmClient {
   public a2aToken?: string
   public batonStore?: BatonStore
   public currentBatonId?: string  // set when executing inside a Baton
+  public runnerHub?: DurableObjectStub  // Runner Hub DO stub (set when RUNNER_HUB binding available)
 
   constructor(
     private apiKey: string,
@@ -295,6 +297,8 @@ export class LlmClient {
       // Derive dynamic tools from chat history (skip for vision models)
       const allTools = isVisionModel ? [] : [
         ...STATIC_TOOLS,
+        // Only add runner tools when RunnerHub is available
+        ...(this.runnerHub ? [execTool, runnerListTool] : []),
         ...extractCapabilitiesFromHistory(messages).map(capabilityToTool),
       ]
 
@@ -481,6 +485,22 @@ export class LlmClient {
         return JSON.stringify({ error: 'Baton system not available in this context' })
       }
       return await handleSpawnTask(args as SpawnTaskArgs, this.currentBatonId, this.batonStore)
+    }
+
+    // ── Runner: exec command on connected Runner ──
+    if (name === 'exec') {
+      if (!this.runnerHub) {
+        return JSON.stringify({ error: 'No Runner connected. RunnerHub not available.' })
+      }
+      return await handleExec(args as ExecArgs, this.runnerHub)
+    }
+
+    // ── Runner: list connected runners ──
+    if (name === 'runner_list') {
+      if (!this.runnerHub) {
+        return JSON.stringify({ error: 'RunnerHub not available.', runners: [] })
+      }
+      return await handleRunnerList(this.runnerHub)
     }
 
     // ── Dynamic capability tools ──

@@ -15,4 +15,5 @@ export interface Env {
   A2A_TOKEN?: string     // Optional: A2A auth token for agent collaboration
   AI: any
   DEBUG_ENABLED?: string
+  RUNNER_HUB?: DurableObjectNamespace  // Runner Hub DO binding
 }

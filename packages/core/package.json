@@ -58,6 +58,10 @@
       "types": "./dist/short-id.d.ts",
       "default": "./dist/short-id.js"
     },
+    "./runner-hub": {
+      "types": "./dist/runner-hub.d.ts",
+      "default": "./dist/runner-hub.js"
+    },
     "./tools/*": {
       "types": "./dist/tools/*.d.ts",
       "default": "./dist/tools/*.js"
