@@ -187,7 +187,7 @@ export function MessageBubble({ message, index = 0 }: MessageBubbleProps) {
     <motion.div
       className={cn(
         'flex gap-2.5 max-w-[85%] md:max-w-[75%]',
-        isUser ? 'self-end flex-row-reverse' : 'self-start',
+        isUser ? 'ml-auto flex-row-reverse' : 'self-start',
       )}
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
