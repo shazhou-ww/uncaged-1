@@ -27,6 +27,14 @@ binding = "BATON_DB"
 database_name = "baton-store"
 database_id = "6729fa63-c1e3-45ca-8896-689c21eabf4f"
 
+# Sigil execution engine bindings (Phase 3b)
+[[kv_namespaces]]
+binding = "SIGIL_KV"
+id = "9943c8873e724b0fb2cf24b4475e5a52"
+
+[[worker_loaders]]
+binding = "LOADER"
+
 # Baton task queue
 [[queues.producers]]
 queue = "baton-events"

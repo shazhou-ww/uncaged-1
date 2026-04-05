@@ -61,6 +61,26 @@
     "./tools/*": {
       "types": "./dist/tools/*.d.ts",
       "default": "./dist/tools/*.js"
+    },
+    "./sigil/worker-pool": {
+      "types": "./dist/sigil/worker-pool.d.ts",
+      "default": "./dist/sigil/worker-pool.js"
+    },
+    "./sigil/types": {
+      "types": "./dist/sigil/types.d.ts",
+      "default": "./dist/sigil/types.js"
+    },
+    "./sigil/codegen": {
+      "types": "./dist/sigil/codegen.d.ts",
+      "default": "./dist/sigil/codegen.js"
+    },
+    "./sigil/embedding": {
+      "types": "./dist/sigil/embedding.d.ts",
+      "default": "./dist/sigil/embedding.js"
+    },
+    "./sigil/kv": {
+      "types": "./dist/sigil/kv.d.ts",
+      "default": "./dist/sigil/kv.js"
     }
   },
   "devDependencies": {

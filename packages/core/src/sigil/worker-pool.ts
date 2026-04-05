@@ -1,0 +1,383 @@
+// Dynamic Workers backend: deploy stores code in KV, invoke uses LOADER.get().
+// No CF API calls, no independent worker scripts, no slot management.
+
+import type { SigilBackend, DeployParams, DeployResult, Capability, BackendStatus, QueryParams, QueryResult, QueryItem } from './types.js'
+import { KvStore } from './kv.js'
+import { LruScheduler } from './lru.js'
+import { CONFIG } from './config.js'
+import { EmbeddingService, cosineSimilarity, mmrSelect } from './embedding.js'
+import { generateWorkerCode, generateWorkerCodeWithDeps, type InputSchema, type DependencyInfo } from './codegen.js'
+
+export interface WorkerLoader {
+  get(id: string, loader: () => any): { getEntrypoint(name?: string): { fetch(request: Request): Promise<Response> } }
+}
+
+export class WorkerPool implements SigilBackend {
+  private kv: KvStore
+  private lru: LruScheduler
+  private embeddingService: EmbeddingService
+  private config = CONFIG
+
+  constructor(
+    kv: KVNamespace,
+    private loader: WorkerLoader,
+    embeddingService: EmbeddingService,
+  ) {
+    this.kv = new KvStore(kv)
+    this.lru = new LruScheduler(this.kv)
+    this.embeddingService = embeddingService
+  }
+
+  private async generateHash(input: string): Promise<string> {
+    const encoder = new TextEncoder()
+    const data = encoder.encode(input)
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+    const hashArray = Array.from(new Uint8Array(hashBuffer))
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').slice(0, this.config.HASH_LENGTH)
+  }
+
+  /**
+   * 递归解析依赖，检测循环依赖
+   */
+  private async resolveDependencies(
+    requires: string[],
+    visited = new Set<string>(),
+    path: string[] = []
+  ): Promise<Record<string, DependencyInfo>> {
+    const deps: Record<string, DependencyInfo> = {}
+
+    for (const depName of requires) {
+      // 检测循环依赖 - 在访问KV之前先检查
+      if (visited.has(depName)) {
+        const cycle = [...path, depName].join(' -> ')
+        throw new Error(`Circular dependency detected: ${cycle}`)
+      }
+
+      // 标记为已访问
+      const newVisited = new Set(visited)
+      newVisited.add(depName)
+      const newPath = [...path, depName]
+
+      const depCode = await this.kv.getCode(depName)
+      const depMeta = await this.kv.getMeta(depName)
+
+      if (!depCode || !depMeta) {
+        throw new Error(`Dependency not found: ${depName}`)
+      }
+
+      // 如果该依赖还有自己的依赖，递归解析
+      if (depMeta.requires && depMeta.requires.length > 0) {
+        const nestedDeps = await this.resolveDependencies(depMeta.requires, newVisited, newPath)
+        Object.assign(deps, nestedDeps)
+      }
+
+      // Use stored execute body if available, fall back to extraction from code
+      const executeBody = depMeta.execute || this.extractExecuteBodyFromWorkerCode(depCode)
+
+      if (depMeta.schema) {
+        deps[depName] = {
+          code: executeBody,
+          schema: depMeta.schema
+        }
+            } else {
+        // Code mode or no schema — use stored execute or full code
+        deps[depName] = { code: depMeta.execute || depCode }
+      }
+    }
+
+    return deps
+  }
+
+  /**
+   * 从生成的 worker code 中提取用户的 execute body
+   * 这是一个简化的实现，实际项目中应该分别存储原始 execute body
+   */
+  private extractExecuteBodyFromWorkerCode(workerCode: string): string {
+    // 查找 "const __result = await (async (input) => {" 后的内容
+    const match = workerCode.match(/const __result = await \(async \(input\) => \{\s*([\s\S]*?)\s*\}\)\(input\);/)
+    if (match && match[1]) {
+      return match[1].trim()
+    }
+    // 如果无法提取，返回空函数
+    return 'return null;'
+  }
+
+  async deploy(params: DeployParams): Promise<DeployResult> {
+    const { name, code, schema, execute, type, ttl, bindings, description, tags, examples, requires } = params
+
+    let finalCode: string
+
+    if (code) {
+      // 模式 A：完整 Worker 代码
+      finalCode = code
+    } else {
+      // 模式 B：schema + execute
+      if (!execute) {
+        throw new Error('deploy: execute is required when using schema mode')
+      }
+
+      const finalSchema = schema || { type: 'object', properties: {} }
+
+      if (requires && requires.length > 0) {
+        // 有依赖，解析并生成带依赖的代码
+        try {
+          // 先检查自引用循环
+          const capabilityName = name || 'temp-name-for-cycle-check'
+          const initialVisited = new Set([capabilityName])
+          const deps = await this.resolveDependencies(requires, initialVisited, [capabilityName])
+          finalCode = generateWorkerCodeWithDeps(finalSchema, execute, deps)
+        } catch (error: any) {
+          throw new Error(`Failed to resolve dependencies: ${error.message}`)
+        }
+      } else {
+        // 无依赖，使用原有逻辑
+        finalCode = generateWorkerCode(finalSchema, execute)
+      }
+    }
+
+    let capability: string
+    if (name === null) {
+      const hash = await this.generateHash(finalCode + Date.now())
+      capability = `t-${hash}`
+    } else {
+      capability = name
+    }
+
+    const now = Date.now()
+
+    // LRU eviction: mark oldest as not-deployed when quota exceeded
+    let deployed = await this.lru.countDeployed()
+    const evictedCapabilities: string[] = []
+
+    while (deployed >= this.config.MAX_SLOTS) {
+      const candidate = await this.lru.findEvictionCandidate()
+      if (!candidate) break
+
+      evictedCapabilities.push(candidate.capability)
+      const existingLru = await this.kv.getLru(candidate.capability)
+      if (existingLru) {
+        await this.kv.setLru(candidate.capability, { ...existingLru, deployed: false })
+      }
+      await this.kv.incrementEvictionCount()
+      deployed = await this.lru.countDeployed()
+    }
+
+    const evictedCapability = evictedCapabilities[0]
+
+    // Write KV entries - code loaded dynamically at invoke time via LOADER
+    await this.kv.setCode(capability, finalCode)
+    await this.kv.setMeta(capability, {
+      type, ttl, created_at: now, bindings, description, tags, examples, schema, requires,
+      execute: execute || undefined,
+    })
+    await this.kv.setLru(capability, { last_access: now, access_count: 0, deployed: true })
+    await this.kv.setRoute(capability, { worker_name: capability, subdomain: '' })
+
+    // Compute and store embedding
+    try {
+      const text = EmbeddingService.buildCapabilityText({ name: capability, description, tags, examples })
+      const vector = await this.embeddingService.embed(text)
+      await this.kv.setEmbedding(capability, vector)
+    } catch (e) {
+      console.error('[sigil] embedding error during deploy:', e)
+    }
+
+    const url = `${this.config.GATEWAY_URL}/run/${capability}`
+    const result: DeployResult = { capability, url, cold_start: false }
+
+    if (type === 'ephemeral' && ttl !== undefined) {
+      result.expires_at = new Date(now + ttl * 1000).toISOString()
+    }
+    if (evictedCapability) {
+      result.evicted = evictedCapability
+    }
+
+    return result
+  }
+
+  async invoke(capabilityName: string, request: Request): Promise<Response> {
+    const code = await this.kv.getCode(capabilityName)
+    if (!code) {
+      return new Response(JSON.stringify({ error: 'Capability not found' }), {
+        status: 404, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    const lru = await this.kv.getLru(capabilityName)
+    const isColdStart = !lru?.deployed
+
+    // Update LRU access stats
+    await this.kv.setLru(capabilityName, {
+      last_access: Date.now(),
+      access_count: (lru?.access_count ?? 0) + 1,
+      deployed: true,
+    })
+
+    // Dynamic Workers: LOADER.get(id, fn) caches warm instances by id
+    const codeHash = await this.generateHash(code)
+    const workerId = `sigil:${capabilityName}:${codeHash}`
+
+    try {
+      const worker = this.loader.get(workerId, () => ({
+        compatibilityDate: '2026-04-03',
+        mainModule: 'worker.js',
+        modules: { 'worker.js': code },
+      }))
+
+      const response = await worker.getEntrypoint().fetch(request)
+
+      if (isColdStart) {
+        const headers = new Headers(response.headers)
+        headers.set('X-Sigil-Cold-Start', 'true')
+        return new Response(response.body, { status: response.status, headers })
+      }
+      return response
+    } catch (e: any) {
+      console.error(`[sigil] Dynamic Worker invoke error for ${capabilityName}:`, e)
+      return new Response(JSON.stringify({ error: e.message || 'Invoke failed' }), {
+        status: 500, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+  }
+
+  async remove(capabilityName: string): Promise<void> {
+    await this.kv.deleteCode(capabilityName)
+    await this.kv.deleteMeta(capabilityName)
+    await this.kv.deleteLru(capabilityName)
+    await this.kv.deleteRoute(capabilityName)
+    await this.kv.deleteEmbedding(capabilityName)
+  }
+
+  async query(params: QueryParams): Promise<QueryResult> {
+    const { q, mode: rawMode, limit: rawLimit, cursor } = params
+    const mode = rawMode ?? (q ? 'find' : 'explore')
+    const defaultLimit = mode === 'find' ? 3 : 20
+    const limit = rawLimit ?? defaultLimit
+    const caps = await this.kv.listCapabilities()
+
+    if (!q) {
+      const allCapabilities: Capability[] = []
+      for (const cap of caps) {
+        const meta = await this.kv.getMeta(cap)
+        const lru = await this.kv.getLru(cap)
+        if (!meta || !lru) continue
+        const capability: Capability = {
+          capability: cap, type: meta.type, deployed: lru.deployed,
+          last_access: lru.last_access, access_count: lru.access_count,
+          created_at: meta.created_at, description: meta.description,
+          tags: meta.tags, examples: meta.examples,
+        }
+        if (meta.ttl !== undefined) {
+          capability.ttl = meta.ttl
+          capability.expires_at = new Date(meta.created_at + meta.ttl * 1000).toISOString()
+        }
+        allCapabilities.push(capability)
+      }
+      const sorted = allCapabilities.sort((a, b) => b.created_at - a.created_at)
+      const items: QueryItem[] = sorted.map(cap => ({
+        capability: cap.capability, description: cap.description, type: cap.type, score: 1.0,
+      }))
+      const offset = cursor ? parseInt(cursor, 10) : 0
+      return { total: items.length, items: items.slice(offset, offset + limit) }
+    }
+
+    const queryVec = await this.embeddingService.embedQuery(q)
+    const embeddingCandidates: Array<{ capability: string; vector: number[]; meta: any; lru: any }> = []
+    const fallbackCandidates: Capability[] = []
+
+    for (const cap of caps) {
+      const vector = await this.kv.getEmbedding(cap)
+      const meta = await this.kv.getMeta(cap)
+      const lru = await this.kv.getLru(cap)
+      if (!meta || !lru) continue
+      if (vector) {
+        embeddingCandidates.push({ capability: cap, vector, meta, lru })
+      } else {
+        fallbackCandidates.push({
+          capability: cap, type: meta.type, deployed: lru.deployed,
+          last_access: lru.last_access, access_count: lru.access_count,
+          created_at: meta.created_at, description: meta.description,
+          tags: meta.tags, examples: meta.examples, schema: meta.schema,
+        })
+      }
+    }
+
+    const qLower = q.toLowerCase()
+    const fallbackItems: QueryItem[] = fallbackCandidates
+      .filter(cap => (
+        cap.capability.toLowerCase().includes(qLower) ||
+        cap.description?.toLowerCase().includes(qLower) ||
+        cap.tags?.some(t => t.toLowerCase().includes(qLower))
+      ))
+      .map(cap => ({
+        capability: cap.capability, description: cap.description, tags: cap.tags,
+        examples: cap.examples, type: cap.type, deployed: cap.deployed,
+        access_count: cap.access_count, score: 0.5, schema: cap.schema,
+      }))
+
+    const effectiveMode = (mode === 'find' && !q) ? 'explore' : mode
+
+    if (effectiveMode === 'find') {
+      const scored = embeddingCandidates
+        .map(c => ({ ...c, score: cosineSimilarity(queryVec, c.vector) }))
+        .filter(c => c.score > 0.3)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+      const embeddingItems: QueryItem[] = scored.map(c => ({
+        capability: c.capability, description: c.meta.description, tags: c.meta.tags,
+        examples: c.meta.examples, type: c.meta.type, deployed: c.lru.deployed,
+        access_count: c.lru.access_count, score: Math.round(c.score * 1000) / 1000,
+        schema: c.meta.schema,
+      }))
+      const embeddingCaps = new Set(embeddingItems.map(i => i.capability))
+      const fallbackOnly = fallbackItems.filter(i => !embeddingCaps.has(i.capability))
+      const items = [...embeddingItems, ...fallbackOnly].sort((a, b) => b.score - a.score).slice(0, limit)
+      const offset = cursor ? parseInt(cursor, 10) : 0
+      return { total: items.length, items: items.slice(offset, offset + limit) }
+    } else {
+      const results = mmrSelect(queryVec, embeddingCandidates, limit, 0.5)
+      const embeddingItems: QueryItem[] = results
+        .filter(r => r.score > 0.2)
+        .map(r => ({ capability: r.capability, description: r.meta.description, type: r.meta.type, score: Math.round(r.score * 1000) / 1000 }))
+      const embeddingCaps = new Set(embeddingItems.map(i => i.capability))
+      const fallbackOnly = fallbackItems
+        .filter(i => !embeddingCaps.has(i.capability))
+        .map(({ capability, description, type, score }) => ({ capability, description, type, score }))
+      const items = [...embeddingItems, ...fallbackOnly].sort((a, b) => b.score - a.score).slice(0, limit)
+      const offset = cursor ? parseInt(cursor, 10) : 0
+      return { total: items.length, items: items.slice(offset, offset + limit) }
+    }
+  }
+
+  async inspect(capabilityName: string): Promise<Capability | null> {
+    const meta = await this.kv.getMeta(capabilityName)
+    const lru = await this.kv.getLru(capabilityName)
+    if (!meta || !lru) return null
+    const capability: Capability = {
+      capability: capabilityName, type: meta.type, deployed: lru.deployed,
+      last_access: lru.last_access, access_count: lru.access_count, created_at: meta.created_at,
+    }
+    if (meta.ttl !== undefined) {
+      capability.ttl = meta.ttl
+      capability.expires_at = new Date(meta.created_at + meta.ttl * 1000).toISOString()
+    }
+    return capability
+  }
+
+  async status(): Promise<BackendStatus> {
+    const caps = await this.kv.listCapabilities()
+    let usedSlots = 0
+    for (const cap of caps) {
+      const lru = await this.kv.getLru(cap)
+      if (lru?.deployed) usedSlots++
+    }
+    const evictionCount = await this.kv.getEvictionCount()
+    return {
+      backend: 'worker-pool',
+      total_slots: this.config.MAX_SLOTS,
+      used_slots: Math.min(usedSlots, this.config.MAX_SLOTS),
+      lru_enabled: true,
+      eviction_count: evictionCount,
+    }
+  }
+}

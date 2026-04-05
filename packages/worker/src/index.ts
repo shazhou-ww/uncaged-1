@@ -17,6 +17,12 @@ import { handleWebRoutes } from './channels/web.js'
 import { SlugResolver } from './slug-resolver.js'
 import { handleCapabilitiesRoutes } from './capabilities.js'
 import { handleAgentCapabilitiesRoutes } from './agent-capabilities.js'
+import { 
+  handleCapabilityDeploy, 
+  handleCapabilityInvoke, 
+  handleCapabilityQuery, 
+  handleCapabilityInspect 
+} from './sigil-routes.js'
 
 // Unified environment — all channel secrets are optional
 export interface WorkerEnv extends Env {
@@ -29,6 +35,9 @@ export interface WorkerEnv extends Env {
   SESSION_SECRET?: string
   // Comma-separated list of instanceIds that enable web channel (e.g. "xiaomai,another")
   WEB_INSTANCES?: string
+  // Sigil execution engine bindings (Phase 3b)
+  SIGIL_KV?: KVNamespace
+  LOADER?: any  // worker_loaders binding
 }
 
 // Session interface (used by web channel)
@@ -259,6 +268,35 @@ async function routeRequest(
 ): Promise<Response> {
   // ─── Capabilities routes (owner-level and platform) ───
   if (routingInfo?.ownerSlug && routingInfo?.ownerId) {
+    // ─── Sigil execution routes ───
+    // POST /:owner/api/v1/capabilities/deploy
+    if (pathname === '/api/v1/capabilities/deploy' && request.method === 'POST') {
+      return handleCapabilityDeploy({
+        env,
+        ownerSlug: routingInfo.ownerSlug
+      }, request)
+    }
+
+    // GET /:owner/api/v1/capabilities/query
+    if (pathname === '/api/v1/capabilities/query' && request.method === 'GET') {
+      const url = new URL(request.url)
+      return handleCapabilityQuery({
+        env,
+        ownerSlug: routingInfo.ownerSlug
+      }, url)
+    }
+
+    // GET /:owner/api/v1/capabilities/:slug/inspect
+    if (pathname.startsWith('/api/v1/capabilities/') && pathname.endsWith('/inspect') && request.method === 'GET') {
+      const pathParts = pathname.split('/')
+      const capabilitySlug = pathParts[4]  // /api/v1/capabilities/:slug/inspect
+      return handleCapabilityInspect({
+        env,
+        ownerSlug: routingInfo.ownerSlug
+      }, capabilitySlug)
+    }
+
+    // Standard capabilities CRUD routes
     const capResponse = await handleCapabilitiesRoutes(
       request, 
       env, 
@@ -266,6 +304,19 @@ async function routeRequest(
       routingInfo.ownerId
     )
     if (capResponse) return capResponse
+  }
+
+  // ─── Agent-level Sigil routes ───
+  if (routingInfo?.ownerSlug && routingInfo?.agentId) {
+    // POST /:owner/:agent/run/:capability
+    if (pathname.startsWith('/run/') && request.method === 'POST') {
+      const capabilitySlug = pathname.slice(5)  // Remove '/run/' prefix
+      return handleCapabilityInvoke({
+        env,
+        ownerSlug: routingInfo.ownerSlug,
+        agentSlug: routingInfo.agentId  // Using agentId as agentSlug for now
+      }, capabilitySlug, request)
+    }
   }
 
   // ─── Agent capabilities routes ───
@@ -351,6 +402,11 @@ export default {
 
       // For owner-only routes, don't strip path or build agent clients
       if (routing.ownerOnly) {
+        // Strip the owner slug prefix: /scott/api/v1/... → /api/v1/...
+        // For /platform/capabilities → /capabilities
+        const segments = url.pathname.split('/').filter(Boolean)
+        const strippedOwnerPath = '/' + segments.slice(1).join('/')
+        
         // Owner-level or platform routes - no instance clients needed
         const dummyClients = buildClients(env, 'dummy') // Minimal clients for API auth
         return await routeRequest(
@@ -359,7 +415,7 @@ export default {
           dummyClients, 
           undefined, // no instanceId 
           ctx, 
-          url.pathname,
+          strippedOwnerPath,
           { ownerId: routing.ownerId, ownerSlug: routing.ownerSlug }
         )
       }
