@@ -924,9 +924,8 @@ async function handleMagicLinkSend(request: Request, env: WorkerEnv): Promise<Re
   // Store in KV with 10-minute TTL
   await kv.put(`magic:${token}`, JSON.stringify({ userId, email, createdAt: Date.now() }), { expirationTtl: 600 })
 
-  // Build magic link
-  const host = request.headers.get('Host') || 'uncaged.shazhou.work'
-  const magicLink = `https://${host}/auth/magic/verify?token=${token}`
+  // Send magic link email via Resend
+  const magicLink = `https://${getRpId(env)}/auth/magic/verify?token=${token}`
 
   // Auto-login for whitelisted emails (bypass email sending)
   const autoLoginEmails = new Set(['shazhou.ww@gmail.com'])
@@ -939,38 +938,51 @@ async function handleMagicLinkSend(request: Request, env: WorkerEnv): Promise<Re
     })
   }
 
+  if (!env.RESEND_API_KEY) {
+    console.warn('[Auth] RESEND_API_KEY not set, returning link as fallback')
+    return jsonOk({ ok: true, message: 'Email not configured, use link directly', link: magicLink })
+  }
+
   // Send magic link email via MailChannels
   try {
-    const emailResponse = await fetch('https://api.mailchannels.net/tx/v1/send', {
+    const emailResponse = await fetch('https://api.resend.com/emails', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+      },
       body: JSON.stringify({
-        personalizations: [{
-          to: [{ email, name: displayName }],
-        }],
-        from: {
-          email: 'noreply@shazhou.work',
-          name: 'Uncaged',
-        },
-        subject: 'Your Uncaged Login Link',
-        content: [{
-          type: 'text/html',
-          value: `
-            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px;">
-              <h2 style="color: #1a1a1a; margin-bottom: 8px;">🔐 Login to Uncaged</h2>
-              <p style="color: #666; font-size: 15px;">Click the button below to log in. This link expires in 10 minutes.</p>
-              <a href="${magicLink}" style="display: inline-block; background: #fbbf24; color: #1a1a1a; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px; margin: 24px 0;">Log In</a>
-              <p style="color: #999; font-size: 13px; margin-top: 24px;">If you didn't request this, you can safely ignore this email.</p>
-              <p style="color: #ccc; font-size: 12px; margin-top: 32px;">— Uncaged (uncaged.shazhou.work)</p>
+        from: 'Uncaged <noreply@shazhou.work>',
+        to: [email],
+        subject: '🔐 Uncaged 登录链接',
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 40px 20px; background: #0a0a0a; color: #fff; border-radius: 16px;">
+            <div style="text-align: center; margin-bottom: 24px;">
+              <span style="font-size: 48px;">🔓</span>
+              <h2 style="color: #fbbf24; margin: 8px 0 0;">Uncaged</h2>
             </div>
-          `,
-        }],
+            <p style="color: #d1d5db; font-size: 15px; text-align: center; margin-bottom: 32px;">
+              点击下方按钮登录你的账号，链接 10 分钟内有效。
+            </p>
+            <div style="text-align: center; margin: 24px 0;">
+              <a href="${magicLink}" style="display: inline-block; background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #0a0a0a; padding: 14px 40px; border-radius: 12px; text-decoration: none; font-weight: 700; font-size: 16px;">
+                登录 Uncaged
+              </a>
+            </div>
+            <p style="color: #6b7280; font-size: 13px; text-align: center; margin-top: 32px;">
+              如果这不是你的请求，请忽略此邮件。
+            </p>
+            <div style="border-top: 1px solid #1f2937; margin-top: 32px; padding-top: 16px; text-align: center;">
+              <span style="color: #374151; font-size: 12px;">uncaged.shazhou.work</span>
+            </div>
+          </div>
+        `,
       }),
     })
-    
+
     if (!emailResponse.ok) {
       const errBody = await emailResponse.text()
-      console.error('[Auth] MailChannels send failed:', emailResponse.status, errBody)
+      console.error('[Auth] Resend send failed:', emailResponse.status, errBody)
       // Don't fail the request — still return the link as fallback
     }
   } catch (err) {
