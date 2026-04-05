@@ -388,10 +388,16 @@ export function getLoginPageHTML(): string {
 
     // ─── Auto-redirect if already logged in ───
     (function() {
-      // Check session via cookie-based auth
       fetch('/auth/session', { credentials: 'same-origin' })
         .then(r => {
-          if (r.ok) window.location.href = '/';
+          if (r.ok) return r.json();
+          return null;
+        }).then(data => {
+          if (!data || !data.user) return;
+          // Redirect to first owned agent, or user's home
+          if (data.agents && data.agents.length > 0) {
+            window.location.href = '/' + data.user.slug + '/' + data.agents[0].slug + '/';
+          }
         }).catch(() => {});
     })();
 

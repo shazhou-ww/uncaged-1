@@ -755,6 +755,14 @@ async function handleSession(request: Request, env: WorkerEnv): Promise<Response
     .bind(userId)
     .all<{ type: string; external_id: string; created_at: number }>()
 
+  // Fetch agents owned by this user
+  const agents = await db
+    .prepare(
+      'SELECT id, slug, display_name FROM agents WHERE owner_id = ?',
+    )
+    .bind(userId)
+    .all<{ id: string; slug: string; display_name: string }>()
+
   return jsonOk({
     user: {
       id: user.id,
@@ -762,6 +770,11 @@ async function handleSession(request: Request, env: WorkerEnv): Promise<Response
       slug: user.slug,
       createdAt: user.created_at,
     },
+    agents: (agents.results || []).map((a: { id: string; slug: string; display_name: string }) => ({
+      id: a.id,
+      slug: a.slug,
+      displayName: a.display_name,
+    })),
     credentials: creds.results.map((c: { type: string; external_id: string; created_at: number }) => ({
       type: c.type,
       externalId: c.type === 'passkey' ? c.external_id.slice(0, 8) + '...' : c.external_id,
