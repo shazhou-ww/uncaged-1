@@ -1114,6 +1114,14 @@ async function issueTokens(
   return { accessToken, refreshToken, expiresIn: ACCESS_TOKEN_TTL }
 }
 
+/** Exported version for use by other modules (e.g., index.ts chat API) */
+export async function extractUserIdFromRequest(
+  request: Request,
+  env: WorkerEnv,
+): Promise<string | null> {
+  return extractUserIdFromToken(request, env)
+}
+
 async function extractUserIdFromToken(
   request: Request,
   env: WorkerEnv,

@@ -450,7 +450,83 @@ async function routeRequest(
     )
   }
 
-  // ─── Web channel (OAuth + UI + API) ───
+  // ─── New auth-based API routes (JWT cookie auth) ───
+  // These routes use the new auth system (Passkey/MagicLink/Google OAuth)
+  // and are independent of the legacy web channel
+  if (pathname === '/api/chat' && request.method === 'POST') {
+    // Authenticate via JWT cookie or Bearer token
+    const { extractUserIdFromRequest } = await import('./auth.js')
+    const userId = await extractUserIdFromRequest(request, env)
+    if (!userId) {
+      return new Response(JSON.stringify({ error: '未登录，请先登录' }), {
+        status: 401, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    const { sigil, llm, chatStore, soul, memory } = clients
+    const body = await request.json() as { message?: string }
+    const userMessage = body.message?.trim()
+    if (!userMessage) {
+      return new Response(JSON.stringify({ error: 'message required' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    try {
+      const chatId = `web:${userId}`
+      let messages = await chatStore.load(chatId)
+      const { messages: compressed } = chatStore.maybeCompress(messages)
+      messages = compressed
+      messages.push({ role: 'user' as const, content: userMessage })
+
+      const memorySessionId = `${instanceId}:${userId}`
+      const { reply, updatedMessages } = await llm.agentLoop(
+        messages, sigil, soul, memory, memorySessionId,
+      )
+
+      await chatStore.save(chatId, updatedMessages)
+      Promise.allSettled([
+        memory.store(userMessage, 'user', memorySessionId),
+        memory.store(reply, 'assistant', memorySessionId),
+      ])
+
+      return new Response(JSON.stringify({ response: reply, timestamp: Date.now() }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    } catch (e: any) {
+      console.error('[chat] error:', e)
+      return new Response(JSON.stringify({ error: '抱歉，遇到了问题，请稍后重试 😥' }), {
+        status: 500, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+  }
+
+  if (pathname === '/api/history' && request.method === 'GET') {
+    const { extractUserIdFromRequest } = await import('./auth.js')
+    const userId = await extractUserIdFromRequest(request, env)
+    if (!userId) {
+      return new Response(JSON.stringify({ error: '未登录' }), {
+        status: 401, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    const { chatStore } = clients
+    const chatId = `web:${userId}`
+    const messages = await chatStore.load(chatId)
+    const history = messages
+      .filter(msg => msg.role !== 'system' && msg.role !== 'tool')
+      .map(msg => ({
+        role: msg.role,
+        content: typeof msg.content === 'string' ? msg.content : '[非文本消息]',
+        timestamp: Date.now(),
+      }))
+
+    return new Response(JSON.stringify({ history }), {
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  // ─── Web channel (legacy OAuth + UI + API) ───
   const webEnabled = env.GOOGLE_CLIENT_ID && isWebInstance(env, instanceId)
   if (
     pathname.startsWith('/auth/') ||
