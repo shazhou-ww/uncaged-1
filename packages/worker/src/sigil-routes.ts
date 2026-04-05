@@ -5,6 +5,7 @@ import { WorkerPool, type WorkerLoader } from '@uncaged/core/sigil/worker-pool'
 import { EmbeddingService } from '@uncaged/core/sigil/embedding'
 import type { DeployParams, DeployResult, QueryParams, QueryResult } from '@uncaged/core/sigil/types'
 import type { WorkerEnv } from './index.js'
+import { SlugResolver } from './slug-resolver.js'
 
 export interface SigilRouteContext {
   env: WorkerEnv
@@ -197,18 +198,25 @@ export async function handleCapabilityQuery(
   ctx: SigilRouteContext,
   url: URL
 ): Promise<Response> {
+  const query = url.searchParams.get('q') || undefined
+  const limit = parseInt(url.searchParams.get('limit') || '20')
+  const cappedLimit = Math.min(limit, 50)
+
+  // If no search query, list from D1 (more reliable than KV list)
+  if (!query) {
+    return handleFullListing(ctx, cappedLimit)
+  }
+
+  // With search query, use WorkerPool for semantic search
   try {
     const workerPool = createWorkerPool(ctx.env)
     if (!workerPool) {
       return new Response('Sigil execution engine not configured', { status: 503 })
     }
 
-    const query = url.searchParams.get('q') || undefined
-    const limit = parseInt(url.searchParams.get('limit') || '20')
-
     const queryParams: QueryParams = {
       q: query,
-      limit: Math.min(limit, 50), // Cap at 50
+      limit: cappedLimit,
     }
 
     const result: QueryResult = await workerPool.query(queryParams)
@@ -220,7 +228,7 @@ export async function handleCapabilityQuery(
         if (slugs.length > 0) {
           const placeholders = slugs.map(() => '?').join(',')
           const d1Results = await ctx.env.MEMORY_DB.prepare(`
-            SELECT slug, name, description, created_at, updated_at
+            SELECT slug, display_name, description, created_at, updated_at
             FROM capabilities 
             WHERE owner_id = ? AND slug IN (${placeholders})
           `).bind(ctx.ownerSlug, ...slugs).all()
@@ -262,6 +270,58 @@ export async function handleCapabilityQuery(
       headers: { 'Content-Type': 'application/json' }
     })
   }
+}
+
+async function handleFullListing(ctx: SigilRouteContext, limit: number): Promise<Response> {
+  if (!ctx.env.MEMORY_DB) {
+    return new Response(JSON.stringify({ total: 0, items: [] }), {
+      headers: { 'Content-Type': 'application/json' }
+    })
+  }
+
+  // Query D1 capabilities table, filtered by owner
+  // For now, show all capabilities (platform + owner's)
+  // owner_id comes from resolving the ownerSlug
+  const slugResolver = new SlugResolver(ctx.env.MEMORY_DB, ctx.env.CHAT_KV!)
+  const owner = await slugResolver.resolveOwnerBySlug(ctx.ownerSlug)
+  
+  let results
+  if (owner) {
+    // Show owner's capabilities + platform capabilities
+    results = await ctx.env.MEMORY_DB.prepare(`
+      SELECT id, slug, display_name, description, tags, type, visibility, access_count, created_at
+      FROM capabilities
+      WHERE owner_id = ? OR owner_id = '__platform__'
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).bind(owner.ownerId, limit).all()
+  } else {
+    // Unknown owner — only platform capabilities
+    results = await ctx.env.MEMORY_DB.prepare(`
+      SELECT id, slug, display_name, description, tags, type, visibility, access_count, created_at
+      FROM capabilities
+      WHERE owner_id = '__platform__'
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).bind(limit).all()
+  }
+
+  const items = (results.results || []).map((row: any) => ({
+    capability: row.slug,
+    description: row.description || row.display_name || undefined,
+    tags: row.tags ? tryParseJson(row.tags) : undefined,
+    type: row.type,
+    score: 1.0,
+    access_count: row.access_count || 0,
+  }))
+
+  return new Response(JSON.stringify({ total: items.length, items }), {
+    headers: { 'Content-Type': 'application/json' }
+  })
+}
+
+function tryParseJson(s: string): any {
+  try { return JSON.parse(s) } catch { return undefined }
 }
 
 /**
