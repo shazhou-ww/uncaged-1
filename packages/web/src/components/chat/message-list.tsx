@@ -30,7 +30,7 @@ export function MessageList({ messages, loading, sending }: MessageListProps) {
     <ScrollArea className="flex-1 p-4">
       <div className="flex flex-col gap-4">
         {messages.map((msg, i) => (
-          <MessageBubble key={i} message={msg} />
+          <MessageBubble key={i} message={msg} index={i} />
         ))}
         {sending && <TypingIndicator />}
         <div ref={bottomRef} />

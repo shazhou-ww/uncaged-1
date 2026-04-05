@@ -1,9 +1,11 @@
+import { motion } from 'motion/react'
 import { cn } from '../../lib/utils'
 import { ToolCall } from './tool-call'
 import type { ChatMessage, ContentPart } from '../../lib/api'
 
 interface MessageBubbleProps {
   message: ChatMessage
+  index?: number
 }
 
 function formatTime(ts?: number): string {
@@ -23,10 +25,10 @@ function renderMarkdown(text: string): string {
 
   // Code blocks
   html = html.replace(/```([\s\S]*?)```/g, (_m, code: string) => {
-    return `<pre class="bg-black/60 rounded-lg p-3 overflow-x-auto my-2 text-sm"><code>${code.trim()}</code></pre>`
+    return `<pre class="bg-black/40 border border-white/[0.06] rounded-lg p-3 overflow-x-auto my-2 text-sm font-mono"><code>${code.trim()}</code></pre>`
   })
   // Inline code
-  html = html.replace(/`([^`]+)`/g, '<code class="bg-white/10 px-1.5 py-0.5 rounded text-[0.88em]">$1</code>')
+  html = html.replace(/`([^`]+)`/g, '<code class="bg-white/[0.08] px-1.5 py-0.5 rounded text-[0.88em] font-mono">$1</code>')
   // Bold
   html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
   // Italic
@@ -34,7 +36,7 @@ function renderMarkdown(text: string): string {
   // Links
   html = html.replace(
     /\[([^\]]+)\]\(([^)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener" class="text-accent underline">$1</a>',
+    '<a href="$2" target="_blank" rel="noopener" class="text-accent hover:text-accent-2 underline transition-colors duration-200">$1</a>',
   )
   // Newlines
   html = html.replace(/\n/g, '<br>')
@@ -90,18 +92,28 @@ function renderContent(content: string | ContentPart[]): JSX.Element {
   return <></>
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({ message, index = 0 }: MessageBubbleProps) {
   const isUser = message.role === 'user'
 
   return (
-    <div
+    <motion.div
       className={cn(
-        'flex gap-2 max-w-[85%] animate-[fadeIn_0.2s_ease-out] md:max-w-[75%]',
+        'flex gap-2.5 max-w-[85%] md:max-w-[75%]',
         isUser ? 'self-end flex-row-reverse' : 'self-start',
       )}
+      initial={{ opacity: 0, y: 12 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{
+        duration: 0.4,
+        delay: Math.min(index * 0.05, 0.3),
+        ease: [0.25, 0.46, 0.45, 0.94],
+      }}
     >
       {/* Avatar */}
-      <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xl bg-surface-2">
+      <div className={cn(
+        'w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xl',
+        isUser ? 'bg-user-bg/30' : 'bg-white/[0.05] border border-white/[0.06]',
+      )}>
         {isUser ? '👤' : '🔓'}
       </div>
 
@@ -111,8 +123,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           className={cn(
             'rounded-2xl px-4 py-3 leading-relaxed text-[0.95rem] break-words',
             isUser
-              ? 'bg-user-bg rounded-br-sm'
-              : 'bg-surface-2 border border-border rounded-bl-sm',
+              ? 'bg-gradient-to-br from-user-bg to-[#163252] rounded-br-sm text-text'
+              : 'bg-white/[0.04] backdrop-blur-sm border border-white/[0.06] rounded-bl-sm',
           )}
         >
           {isUser ? (
@@ -125,6 +137,6 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           {formatTime(message.timestamp)}
         </span>
       </div>
-    </div>
+    </motion.div>
   )
 }
