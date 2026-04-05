@@ -50,6 +50,8 @@ export interface WorkerEnv extends Env {
   LOADER?: any  // worker_loaders binding
   // Static assets binding (React SPA)
   ASSETS: Fetcher
+  // Auth config
+  AUTH_RP_ID?: string
 }
 
 // Session interface (used by web channel)
