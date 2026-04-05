@@ -47,6 +47,11 @@ zone_id = "dcfbc03ffea31a6afe08b657022963f8"
 pattern = "xiaomai.shazhou.work/*"
 zone_id = "dcfbc03ffea31a6afe08b657022963f8"
 
+# Route: unified domain with path-based routing
+[[routes]]
+pattern = "uncaged.shazhou.work/*"
+zone_id = "dcfbc03ffea31a6afe08b657022963f8"
+
 [ai]
 binding = "AI"
 
