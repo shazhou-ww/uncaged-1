@@ -12,14 +12,7 @@
  */
 
 import type { WorkerEnv } from './index.js'
-
-// Reserved slugs that cannot be used for capabilities
-const RESERVED_SLUGS = new Set([
-  'auth', 'admin', 'platform', 'id', 'api', 'hook', 
-  'static', 'health', 'well-known', 'webhook', 'login',
-  'register', 'settings', 'help', 'about', 'docs', 'test',
-  'system', 'internal', 'core', 'sigil'
-])
+import { RESERVED_SLUGS } from './constants.js'
 
 interface CreateCapabilityRequest {
   slug: string
