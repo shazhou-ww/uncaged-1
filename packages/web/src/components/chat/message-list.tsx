@@ -14,39 +14,73 @@ interface MessageListProps {
   sending: boolean
 }
 
-interface MessageGroup {
-  messages: ChatMessage[]
-  type: 'single' | 'tool-group'
+/** A renderable entry: one message with optional tool results attached */
+interface MessageEntry {
+  message: ChatMessage
+  /** tool_call_id → tool result ChatMessage */
+  toolResults?: Map<string, ChatMessage>
 }
 
-function groupMessages(messages: ChatMessage[]): MessageGroup[] {
-  const groups: MessageGroup[] = []
-  let i = 0
-  
-  while (i < messages.length) {
-    const message = messages[i]
-    
-    // Check if this is an assistant message with tool_calls
-    if (message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0) {
-      // Start a tool group
-      const toolGroup: ChatMessage[] = [message]
-      i++
-      
-      // Collect following tool messages that belong to this group
-      while (i < messages.length && messages[i].role === 'tool') {
-        toolGroup.push(messages[i])
-        i++
+/**
+ * Build the list of renderable entries.
+ * - Assistant messages with tool_calls absorb subsequent tool-role messages.
+ * - Direct-invoke tool results (standalone) are kept as their own entries.
+ * - Plain tool-role messages that were absorbed are skipped.
+ */
+function buildEntries(messages: ChatMessage[]): MessageEntry[] {
+  const entries: MessageEntry[] = []
+  // Track which message indices are consumed as tool results
+  const consumed = new Set<number>()
+
+  for (let i = 0; i < messages.length; i++) {
+    if (consumed.has(i)) continue
+
+    const msg = messages[i]
+
+    if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+      // Absorb subsequent tool-role messages
+      const toolResults = new Map<string, ChatMessage>()
+      let j = i + 1
+
+      while (j < messages.length && messages[j].role === 'tool') {
+        const toolMsg = messages[j]
+
+        // Skip direct-invoke results — they stay standalone
+        let isDirectInvoke = false
+        if (typeof toolMsg.content === 'string') {
+          try {
+            const parsed = JSON.parse(toolMsg.content)
+            if (parsed._directInvoke) isDirectInvoke = true
+          } catch { /* not JSON */ }
+        }
+
+        if (isDirectInvoke) {
+          // Don't consume — will be its own entry
+          break
+        }
+
+        // Match by tool_call_id
+        if (toolMsg.tool_call_id) {
+          toolResults.set(toolMsg.tool_call_id, toolMsg)
+        }
+        consumed.add(j)
+        j++
       }
-      
-      groups.push({ messages: toolGroup, type: 'tool-group' })
+
+      entries.push({
+        message: msg,
+        toolResults: toolResults.size > 0 ? toolResults : undefined,
+      })
+    } else if (msg.role === 'tool') {
+      // Standalone tool message (direct-invoke or orphan)
+      entries.push({ message: msg })
     } else {
-      // Single message
-      groups.push({ messages: [message], type: 'single' })
-      i++
+      // user, assistant (no tool_calls), system
+      entries.push({ message: msg })
     }
   }
-  
-  return groups
+
+  return entries
 }
 
 export function MessageList({ messages, loading, sending }: MessageListProps) {
@@ -83,48 +117,33 @@ export function MessageList({ messages, loading, sending }: MessageListProps) {
     )
   }
 
-  const messageGroups = groupMessages(messages)
+  const entries = buildEntries(messages)
 
   return (
     <div className="flex-1 relative">
       <ScrollArea className="h-full px-4 py-4" ref={scrollAreaRef}>
         <div className="flex flex-col gap-4 max-w-3xl mx-auto">
-          {messageGroups.map((group, groupIndex) => {
-            const firstMessage = group.messages[0]
-            const previousGroup = groupIndex > 0 ? messageGroups[groupIndex - 1] : undefined
-            const previousMessage = previousGroup?.messages[0]
+          {entries.map((entry, entryIndex) => {
+            const previousEntry = entryIndex > 0 ? entries[entryIndex - 1] : undefined
             
             return (
-              <div key={groupIndex}>
+              <div key={entryIndex}>
                 {/* Date separator */}
-                {shouldShowDateSeparator(firstMessage, previousMessage) && (
+                {shouldShowDateSeparator(entry.message, previousEntry?.message) && (
                   <div className="flex items-center gap-2 py-2 my-2">
                     <div className="flex-1 h-px bg-white/10"></div>
                     <span className="text-xs text-text-4 px-2 bg-surface rounded-full">
-                      {formatDateSeparator(firstMessage.timestamp)}
+                      {formatDateSeparator(entry.message.timestamp)}
                     </span>
                     <div className="flex-1 h-px bg-white/10"></div>
                   </div>
                 )}
                 
-                {/* Message group */}
-                {group.type === 'tool-group' ? (
-                  <div className="flex flex-col gap-2">
-                    {group.messages.map((msg, msgIndex) => (
-                      <MessageBubble
-                        key={`${groupIndex}-${msgIndex}`}
-                        message={msg}
-                        index={groupIndex}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <MessageBubble
-                    key={groupIndex}
-                    message={group.messages[0]}
-                    index={groupIndex}
-                  />
-                )}
+                <MessageBubble
+                  message={entry.message}
+                  toolResults={entry.toolResults}
+                  index={entryIndex}
+                />
               </div>
             )
           })}
