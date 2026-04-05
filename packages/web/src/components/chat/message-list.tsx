@@ -87,8 +87,8 @@ export function MessageList({ messages, loading, sending }: MessageListProps) {
 
   return (
     <div className="flex-1 relative">
-      <ScrollArea className="h-full p-4" ref={scrollAreaRef}>
-        <div className="flex flex-col gap-4">
+      <ScrollArea className="h-full px-4 py-4" ref={scrollAreaRef}>
+        <div className="flex flex-col gap-4 max-w-3xl mx-auto">
           {messageGroups.map((group, groupIndex) => {
             const firstMessage = group.messages[0]
             const previousGroup = groupIndex > 0 ? messageGroups[groupIndex - 1] : undefined

@@ -12,7 +12,7 @@ export function Header({ agentName, user, onLogout, className }: HeaderProps) {
   return (
     <header
       className={cn(
-        'backdrop-blur-xl bg-surface/80 border-b border-white/[0.05] px-4 py-3 flex items-center justify-between flex-shrink-0 z-10',
+        'sticky top-0 backdrop-blur-xl bg-surface/80 border-b border-white/[0.05] px-4 py-3 flex items-center justify-between flex-shrink-0 z-20',
         className,
       )}
     >

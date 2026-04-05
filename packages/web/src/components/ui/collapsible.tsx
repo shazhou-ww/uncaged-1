@@ -21,7 +21,7 @@ export function Collapsible({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full text-left cursor-pointer select-none"
+        className="w-full text-left cursor-pointer select-none px-3 py-2"
       >
         <div className="flex items-center gap-2">
           <span
