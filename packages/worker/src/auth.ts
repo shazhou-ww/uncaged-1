@@ -33,7 +33,7 @@ const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60 // 30 days
 
 /** Get RP ID from env or use default */
 function getRpId(env: WorkerEnv): string {
-  return (env as any).AUTH_RP_ID || DEFAULT_RP_ID
+  return env.AUTH_RP_ID || DEFAULT_RP_ID
 }
 
 // ─── Types ───
