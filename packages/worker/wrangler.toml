@@ -94,3 +94,4 @@ binding = "AI"
 #   - GOOGLE_CLIENT_ID
 #   - GOOGLE_CLIENT_SECRET
 #   - SESSION_SECRET
+#   - RESEND_API_KEY (email delivery for magic links)

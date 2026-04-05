@@ -38,6 +38,8 @@ export interface WorkerEnv extends Env {
   GOOGLE_CLIENT_ID?: string
   GOOGLE_CLIENT_SECRET?: string
   SESSION_SECRET?: string
+  // Email (Resend)
+  RESEND_API_KEY?: string
   // Comma-separated list of instanceIds that enable web channel (e.g. "xiaomai,another")
   WEB_INSTANCES?: string
   // Sigil execution engine bindings (Phase 3b)
