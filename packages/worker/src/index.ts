@@ -531,6 +531,11 @@ async function routeRequest(
     // Fall through to common routes if web didn't handle it
   }
 
+  // ─── Agent chat page: serve SPA for GET / ───
+  if (pathname === '/' && request.method === 'GET' && routingInfo?.agentId) {
+    return env.ASSETS.fetch(new Request(new URL('/', request.url), request))
+  }
+
   // ─── Common routes (soul/chat/memory/baton/image/health/debug) ───
   const commonResponse = await handleCommonRoutes(request, env, clients, instanceId, { webEnabled: !!webEnabled })
   if (commonResponse) return commonResponse
