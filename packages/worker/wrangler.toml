@@ -20,6 +20,7 @@ index_name = "uncaged-memory-v2"
 binding = "MEMORY_DB"
 database_name = "uncaged-memory"
 database_id = "24bc6992-57b0-4703-807d-6be0a6adac46"
+# Also hosts identity tables (users, credentials, agents, agent_users, channels) — see schema-v3.sql
 
 [[d1_databases]]
 binding = "BATON_DB"

@@ -2,6 +2,7 @@
 // Handles /auth/*, /api/*, and GET / (when web channel is configured)
 
 import { type ContentPart } from '@uncaged/core/chat-store'
+import { unifiedChatKey, unifiedMemorySession } from '@uncaged/core/chat-key'
 import type { WorkerEnv, UserSession } from '../index.js'
 import type { CoreClients } from '../router.js'
 
@@ -182,7 +183,29 @@ export async function handleWebRoutes(
   const session = await verifySessionToken(sessionToken, env.CHAT_KV)
   if (!session) return new Response('Invalid session', { status: 401 })
 
-  const { sigil, llm, chatStore, soul, memory } = clients
+  const { sigil, llm, chatStore, soul, memory, identity } = clients
+
+  // ─── Resolve identity (with fallback to legacy keys) ───
+  let resolvedChatId = `web:${session.email}`
+  let resolvedMemorySessionId = `${instanceId}:${session.name}`
+
+  if (identity) {
+    try {
+      const resolved = await identity.resolve({
+        agentId: instanceId,
+        authType: 'google',
+        externalId: session.email,
+        displayName: session.name,
+        channelType: 'web',
+        channelExternalId: session.email,
+      })
+      resolvedChatId = unifiedChatKey(resolved.agentId, resolved.userId)
+      resolvedMemorySessionId = unifiedMemorySession(resolved.userId)
+    } catch (e) {
+      console.warn('[identity] Web resolve failed, falling back to legacy keys:', e)
+      // Fall back to legacy behavior
+    }
+  }
 
   // ─── Chat API ───
   if (url.pathname === '/api/chat' && request.method === 'POST') {
@@ -198,13 +221,13 @@ export async function handleWebRoutes(
       // Ensure soul is initialized for this instance
       await ensureDefaultSoul(soul, instanceId)
 
-      const chatId = `web:${session.email}`
+      const chatId = resolvedChatId
       let messages = await chatStore.load(chatId)
       const { messages: compressed } = chatStore.maybeCompress(messages)
       messages = compressed
       messages.push({ role: 'user' as const, content: userMessage })
 
-      const memorySessionId = `${instanceId}:${session.name}`
+      const memorySessionId = resolvedMemorySessionId
 
       const { reply, updatedMessages } = await llm.agentLoop(
         messages, sigil, soul, memory, memorySessionId,
@@ -231,7 +254,7 @@ export async function handleWebRoutes(
   // ─── History API ───
   if (url.pathname === '/api/history' && request.method === 'GET') {
     try {
-      const chatId = `web:${session.email}`
+      const chatId = resolvedChatId
       const messages = await chatStore.load(chatId)
 
       const history = messages
@@ -259,7 +282,7 @@ export async function handleWebRoutes(
   // ─── Clear API ───
   if (url.pathname === '/api/clear' && request.method === 'POST') {
     try {
-      const chatId = `web:${session.email}`
+      const chatId = resolvedChatId
       await chatStore.clear(chatId)
       return new Response(JSON.stringify({ success: true }), {
         headers: { 'Content-Type': 'application/json' },

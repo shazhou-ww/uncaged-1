@@ -8,6 +8,8 @@ import { Memory } from '@uncaged/core/memory'
 import { SigilClient } from '@uncaged/core/sigil'
 import { BatonStore } from '@uncaged/core/baton'
 import { storeImageForVL } from '@uncaged/core/utils'
+import type { IdentityResolver } from '@uncaged/core/identity'
+import { unifiedChatKey, unifiedMemorySession } from '@uncaged/core/chat-key'
 import type { WorkerEnv } from './index.js'
 
 export interface CoreClients {
@@ -16,6 +18,7 @@ export interface CoreClients {
   chatStore: ChatStore
   soul: Soul
   memory: Memory
+  identity: IdentityResolver | null
 }
 
 /** Returns Response if handled, null if not matched */
@@ -88,8 +91,28 @@ export async function handleCommonRoutes(
       })
     }
 
-    const chatId = body.chat_id || 'api'
+    const rawChatId = body.chat_id || 'api'
     const userMessage = body.message.trim()
+
+    // Attempt identity resolution for API callers
+    let chatId: string = rawChatId
+    let memorySessionId: string = rawChatId
+    if (clients.identity) {
+      try {
+        const resolved = await clients.identity.resolve({
+          agentId: instanceId,
+          authType: 'api',
+          externalId: rawChatId,
+          channelType: 'api',
+          channelExternalId: rawChatId,
+        })
+        chatId = unifiedChatKey(resolved.agentId, resolved.userId)
+        memorySessionId = unifiedMemorySession(resolved.userId)
+      } catch (e) {
+        console.warn('[identity] API resolve failed, falling back to legacy keys:', e)
+        // Fall back to legacy behavior
+      }
+    }
 
     // Handle commands
     if (userMessage === '/clear') {
@@ -126,7 +149,7 @@ export async function handleCommonRoutes(
     }
 
     try {
-      const storePromise = memory.store(body.message, 'user', chatId)
+      const storePromise = memory.store(body.message, 'user', memorySessionId)
 
       let messages = await chatStore.load(chatId)
       const { messages: compressed } = chatStore.maybeCompress(messages)
@@ -159,10 +182,10 @@ export async function handleCommonRoutes(
         messages.push({ role: 'user', content: body.message })
       }
 
-      const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory, chatId)
+      const { reply, updatedMessages } = await llm.agentLoop(messages, sigil, soul, memory, memorySessionId)
 
       await chatStore.save(chatId, updatedMessages)
-      await Promise.allSettled([storePromise, memory.store(reply, 'assistant', chatId)])
+      await Promise.allSettled([storePromise, memory.store(reply, 'assistant', memorySessionId)])
 
       return new Response(JSON.stringify({ reply, chat_id: chatId }), {
         headers: { 'Content-Type': 'application/json' },

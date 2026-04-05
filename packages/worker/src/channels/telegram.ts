@@ -3,6 +3,7 @@
 
 import { type ContentPart } from '@uncaged/core/chat-store'
 import { storeImageForVL } from '@uncaged/core/utils'
+import { unifiedChatKey, unifiedMemorySession } from '@uncaged/core/chat-key'
 import type { WorkerEnv } from '../index.js'
 import type { CoreClients } from '../router.js'
 
@@ -30,7 +31,7 @@ export async function handleTelegramRoutes(
   instanceId: string,
   ctx?: ExecutionContext,
 ): Promise<Response> {
-  const { sigil, llm, chatStore, soul, memory } = clients
+  const { sigil, llm, chatStore, soul, memory, identity } = clients
   const botToken = env.TELEGRAM_BOT_TOKEN!
 
   const update: TelegramUpdate = await request.json()
@@ -42,20 +43,45 @@ export async function handleTelegramRoutes(
 
   if (!hasText && !hasPhoto) return new Response('ok')
 
-  const chatId = msg!.chat.id
+  const rawChatId = msg!.chat.id
   const userText = (msg!.text || caption).trim()
   const userName = msg!.from?.first_name || 'there'
-  const userTag = msg!.from?.username || msg!.from?.first_name || String(chatId)
-  const memorySessionId = `telegram:${userTag}`
+  const userTag = msg!.from?.username || msg!.from?.first_name || String(rawChatId)
 
   // ─── Chat ID whitelist ───
   const allowedChats = env.ALLOWED_CHAT_IDS
     ? new Set(env.ALLOWED_CHAT_IDS.split(',').map(Number))
     : null
 
-  if (allowedChats && !allowedChats.has(chatId)) {
-    await sendTelegram(botToken, chatId, '⛔ Unauthorized')
+  if (allowedChats && !allowedChats.has(rawChatId)) {
+    await sendTelegram(botToken, rawChatId, '⛔ Unauthorized')
     return new Response('ok')
+  }
+
+  // Note: msg.from can be undefined for channel posts. Fallback to rawChatId means
+  // all messages from a channel would map to the same "user". Currently only private
+  // chats are supported (ALLOWED_CHAT_IDS whitelist), so this is acceptable.
+
+  // ─── Resolve identity (with fallback to legacy keys) ───
+  let chatId: string | number = rawChatId
+  let memorySessionId = `telegram:${userTag}`
+
+  if (identity) {
+    try {
+      const resolved = await identity.resolve({
+        agentId: instanceId,
+        authType: 'telegram',
+        externalId: String(msg!.from?.id ?? rawChatId),
+        displayName: msg!.from?.first_name,
+        channelType: 'telegram',
+        channelExternalId: String(rawChatId),
+      })
+      chatId = unifiedChatKey(resolved.agentId, resolved.userId)
+      memorySessionId = unifiedMemorySession(resolved.userId)
+    } catch (e) {
+      console.warn('[identity] Telegram resolve failed, falling back to legacy keys:', e)
+      // Fall back to legacy behavior
+    }
   }
 
   // ─── Commands ───
@@ -64,7 +90,7 @@ export async function handleTelegramRoutes(
     const soulText = await soul.getSoul()
     const nameMatch = soulText.match(/You are (.+?)[,\n]/)
     const botName = nameMatch ? nameMatch[1] : 'Uncaged 🔓'
-    await sendTelegram(botToken, chatId,
+    await sendTelegram(botToken, rawChatId,
       `Hey ${userName}! I'm ${botName}\n\n` +
       `I can discover and create capabilities on the fly. Just tell me what you need!\n\n` +
       `Type /help to see what I can do.`)
@@ -72,7 +98,7 @@ export async function handleTelegramRoutes(
   }
 
   if (userText === '/help') {
-    await sendTelegram(botToken, chatId,
+    await sendTelegram(botToken, rawChatId,
       `🔓 Commands:\n\n` +
       `/start - Reset conversation\n` +
       `/clear - Clear chat history (memory retained)\n` +
@@ -90,18 +116,18 @@ export async function handleTelegramRoutes(
 
   if (userText === '/clear') {
     await chatStore.clear(chatId)
-    await sendTelegram(botToken, chatId, '🧹 Chat cleared! Long-term memory is still intact.')
+    await sendTelegram(botToken, rawChatId, '🧹 Chat cleared! Long-term memory is still intact.')
     return new Response('ok')
   }
 
   if (userText === '/soul') {
     const soulText = await soul.getSoul()
-    await sendTelegram(botToken, chatId, `👻 My soul:\n\n${soulText}`)
+    await sendTelegram(botToken, rawChatId, `👻 My soul:\n\n${soulText}`)
     return new Response('ok')
   }
 
   if (userText.startsWith('/') && !hasPhoto) {
-    await sendTelegram(botToken, chatId, `Unknown command. Type /help to see available commands.`)
+    await sendTelegram(botToken, rawChatId, `Unknown command. Type /help to see available commands.`)
     return new Response('ok')
   }
 
@@ -109,7 +135,7 @@ export async function handleTelegramRoutes(
   const publicBaseUrl = `https://${new URL(request.url).hostname}`
 
   const processPromise = (async () => {
-    const typingInterval = startTypingIndicator(botToken, chatId, ctx)
+    const typingInterval = startTypingIndicator(botToken, rawChatId, ctx)
 
     try {
       let imageUrl: string | undefined
@@ -151,7 +177,7 @@ export async function handleTelegramRoutes(
 
       const storeAssistantPromise = memory.store(reply, 'assistant', memorySessionId)
       await chatStore.save(chatId, updatedMessages)
-      await sendTelegram(botToken, chatId, reply)
+      await sendTelegram(botToken, rawChatId, reply)
       await Promise.allSettled([storeUserPromise, storeAssistantPromise])
     } catch (e: any) {
       typingInterval.stop()
@@ -161,7 +187,7 @@ export async function handleTelegramRoutes(
           error: e.message, stack: e.stack, time: Date.now(),
         }), { expirationTtl: 3600 })
       } catch {}
-      await sendTelegram(botToken, chatId, `Oops, something went wrong. Try again?`)
+      await sendTelegram(botToken, rawChatId, `Oops, something went wrong. Try again?`)
     }
   })()
 
