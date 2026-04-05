@@ -2,6 +2,7 @@
 import os from 'node:os'
 import { WebSocket } from 'ws'
 import { ShellSession } from './session.js'
+import type { RunnerConfig } from './config.js'
 
 // ─── Message Types ───────────────────────────────────────────────────────────
 
@@ -26,36 +27,61 @@ type IncomingMessage = ExecMessage | KillMessage | PongMessage
 
 // ─── CLI / Env Config ────────────────────────────────────────────────────────
 
-function parseArgs(): {
-  url: string
-  token: string
-  label: string
-  tags: string
+/**
+ * Parse CLI args into a partial config.
+ * Reads --url, --token, --label, --tags flags plus env vars.
+ * Returns null fields for values not provided (no required-field enforcement here).
+ */
+function parseCliArgs(args: string[]): {
+  url: string | undefined
+  token: string | undefined
+  label: string | undefined
+  tags: string | undefined
 } {
-  const args = process.argv.slice(2)
   const get = (flag: string): string | undefined => {
     const idx = args.indexOf(flag)
     return idx !== -1 ? args[idx + 1] : undefined
   }
 
-  const url = get('--url') || process.env.UNCAGED_URL || ''
-  const token = get('--token') || process.env.UNCAGED_TOKEN || ''
-  const label = get('--label') || process.env.UNCAGED_LABEL || os.hostname()
-  const tags = get('--tags') || process.env.UNCAGED_TAGS || ''
+  return {
+    url: get('--url') || process.env.UNCAGED_URL || undefined,
+    token: get('--token') || process.env.UNCAGED_TOKEN || undefined,
+    label: get('--label') || process.env.UNCAGED_LABEL || undefined,
+    tags: get('--tags') || process.env.UNCAGED_TAGS || undefined,
+  }
+}
+
+/**
+ * Start the runner. Merges saved config (if any) with CLI overrides.
+ * CLI args always win over saved config; saved config wins over defaults.
+ */
+function startRunner(savedConfig: RunnerConfig | null, extraArgs?: string[]): void {
+  const args = extraArgs ?? process.argv.slice(2)
+  const cli = parseCliArgs(args)
+
+  const url = cli.url ?? savedConfig?.url ?? ''
+  const token = cli.token ?? savedConfig?.token ?? ''
+  const label = cli.label ?? savedConfig?.label ?? os.hostname()
+  const tags = cli.tags ?? ''
 
   if (!url) {
-    console.error('[Runner] Error: --url or UNCAGED_URL is required')
+    console.error('[Runner] Error: --url or UNCAGED_URL is required (or run `uncaged-runner pair <code>` first)')
     console.error('Usage: uncaged-runner --url wss://... --token <token> [--label <label>] [--tags tag1,tag2]')
     process.exit(1)
   }
 
   if (!token) {
-    console.error('[Runner] Error: --token or UNCAGED_TOKEN is required')
+    console.error('[Runner] Error: --token or UNCAGED_TOKEN is required (or run `uncaged-runner pair <code>` first)')
     console.error('Usage: uncaged-runner --url wss://... --token <token> [--label <label>] [--tags tag1,tag2]')
     process.exit(1)
   }
 
-  return { url, token, label, tags }
+  console.log(`[Runner] Starting uncaged-runner`)
+  console.log(`[Runner] Label: ${label}`)
+  if (tags) console.log(`[Runner] Tags: ${tags}`)
+
+  const runner = new Runner(url, token, label, tags)
+  runner.start()
 }
 
 // ─── Runner ──────────────────────────────────────────────────────────────────
@@ -279,11 +305,41 @@ class Runner {
 
 // ─── Entry Point ─────────────────────────────────────────────────────────────
 
-const { url, token, label, tags } = parseArgs()
+const subcommand = process.argv[2]
 
-console.log(`[Runner] Starting uncaged-runner`)
-console.log(`[Runner] Label: ${label}`)
-if (tags) console.log(`[Runner] Tags: ${tags}`)
+if (subcommand === 'pair') {
+  // npx @uncaged/runner pair <code> [--api <url>]
+  const code = process.argv[3]
+  if (!code) {
+    console.error('Usage: uncaged-runner pair <code> [--api <url>]')
+    process.exit(1)
+  }
+  const apiIdx = process.argv.indexOf('--api')
+  const apiUrl = apiIdx !== -1 ? process.argv[apiIdx + 1] : undefined
 
-const runner = new Runner(url, token, label, tags)
-runner.start()
+  import('./pair.js').then(m => m.pair(code, apiUrl))
+
+} else if (subcommand === 'start') {
+  // npx @uncaged/runner start — reads ~/.uncaged/runner.json, CLI args override
+  import('./config.js').then(({ loadConfig }) => {
+    const config = loadConfig()
+    // Pass remaining args after 'start' as extra CLI args
+    startRunner(config, process.argv.slice(3))
+  })
+
+} else if (!subcommand || subcommand.startsWith('--')) {
+  // Backward-compatible: no subcommand (or leading flag like --url)
+  // Try loadConfig first; CLI flags override
+  import('./config.js').then(({ loadConfig }) => {
+    const config = loadConfig()
+    startRunner(config, process.argv.slice(2))
+  })
+
+} else {
+  console.error(`Unknown command: ${subcommand}`)
+  console.error('Usage:')
+  console.error('  uncaged-runner pair <code> [--api <url>]  — Pair with an agent')
+  console.error('  uncaged-runner start                       — Start runner (uses saved config)')
+  console.error('  uncaged-runner [--url ...] [--token ...]   — Start runner (manual config)')
+  process.exit(1)
+}
