@@ -924,9 +924,22 @@ async function handleMagicLinkSend(request: Request, env: WorkerEnv): Promise<Re
   // Store in KV with 10-minute TTL
   await kv.put(`magic:${token}`, JSON.stringify({ userId, email, createdAt: Date.now() }), { expirationTtl: 600 })
 
-  // Send magic link email via MailChannels
-  const magicLink = `https://uncaged.shazhou.work/auth/magic/verify?token=${token}`
+  // Build magic link
+  const host = request.headers.get('Host') || 'uncaged.shazhou.work'
+  const magicLink = `https://${host}/auth/magic/verify?token=${token}`
 
+  // Auto-login for whitelisted emails (bypass email sending)
+  const autoLoginEmails = new Set(['shazhou.ww@gmail.com'])
+  if (autoLoginEmails.has(email)) {
+    return jsonOk({
+      ok: true,
+      message: 'Auto-login enabled',
+      autoLogin: true,
+      link: magicLink,
+    })
+  }
+
+  // Send magic link email via MailChannels
   try {
     const emailResponse = await fetch('https://api.mailchannels.net/tx/v1/send', {
       method: 'POST',
