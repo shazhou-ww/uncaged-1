@@ -21,7 +21,9 @@ import {
   handleCapabilityDeploy, 
   handleCapabilityInvoke, 
   handleCapabilityQuery, 
-  handleCapabilityInspect 
+  handleCapabilityInspect,
+  handleCapabilitySearch,
+  handleToolInvoke,
 } from './sigil-routes.js'
 import { handleAuthRoutes } from './auth.js'
 import { getManifestJSON } from './pages/manifest.js'
@@ -325,6 +327,15 @@ async function routeRequest(
       }, url)
     }
 
+    // GET /:owner/api/v1/capabilities/search (RFC-001: frontend tool search)
+    if (pathname === '/api/v1/capabilities/search' && request.method === 'GET') {
+      const url = new URL(request.url)
+      return handleCapabilitySearch({
+        env,
+        ownerSlug: routingInfo.ownerSlug
+      }, url)
+    }
+
     // GET /:owner/api/v1/capabilities/:slug/inspect
     if (pathname.startsWith('/api/v1/capabilities/') && pathname.endsWith('/inspect') && request.method === 'GET') {
       const pathParts = pathname.split('/')
@@ -347,6 +358,17 @@ async function routeRequest(
 
   // ─── Agent-level Sigil routes ───
   if (routingInfo?.ownerSlug && routingInfo?.agentId) {
+    // POST /:owner/:agent/api/v1/tools/:slug/invoke (RFC-001: user direct tool invocation)
+    if (pathname.startsWith('/api/v1/tools/') && pathname.endsWith('/invoke') && request.method === 'POST') {
+      const pathParts = pathname.split('/')
+      const toolSlug = pathParts[4]  // /api/v1/tools/:slug/invoke
+      return handleToolInvoke({
+        env,
+        ownerSlug: routingInfo.ownerSlug,
+        agentSlug: routingInfo.agentId,
+      }, toolSlug, request)
+    }
+
     // POST /:owner/:agent/run/:capability
     if (pathname.startsWith('/run/') && request.method === 'POST') {
       const capabilitySlug = pathname.slice(5)  // Remove '/run/' prefix

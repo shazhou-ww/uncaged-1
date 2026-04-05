@@ -15,6 +15,7 @@ interface ChatState {
   sendMessage: (text: string) => Promise<void>
   loadHistory: () => Promise<void>
   clearHistory: () => Promise<void>
+  addToolResult: (toolSlug: string, result: unknown, success: boolean) => void
 }
 
 export function useChat(basePath: string): ChatState {
@@ -132,6 +133,23 @@ export function useChat(basePath: string): ChatState {
     }
   }, [])
 
+  const addToolResult = useCallback(
+    (toolSlug: string, result: unknown, success: boolean) => {
+      const resultMsg: ChatMessage = {
+        role: 'tool',
+        content: JSON.stringify({
+          _directInvoke: true,
+          toolSlug,
+          success,
+          result,
+        }),
+        timestamp: Date.now(),
+      }
+      setMessages(prev => [...prev, resultMsg])
+    },
+    [],
+  )
+
   // Load history on mount
   useEffect(() => {
     loadHistory()
@@ -144,5 +162,6 @@ export function useChat(basePath: string): ChatState {
     sendMessage,
     loadHistory,
     clearHistory: clearChat,
+    addToolResult,
   }
 }

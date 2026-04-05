@@ -10,6 +10,7 @@ import { useVirtualKeyboard } from '../hooks/use-virtual-keyboard'
 export function ChatPage() {
   const { owner, agent } = useParams<{ owner: string; agent: string }>()
   const basePath = `/${owner}/${agent}`
+  const ownerPath = `/${owner}`
 
   return (
     <AuthGuard>
@@ -17,6 +18,7 @@ export function ChatPage() {
         <ChatPageInner
           agentName={agent || ''}
           basePath={basePath}
+          ownerPath={ownerPath}
           user={user}
           logout={logout}
         />
@@ -28,15 +30,17 @@ export function ChatPage() {
 function ChatPageInner({
   agentName,
   basePath,
+  ownerPath,
   user,
   logout,
 }: {
   agentName: string
   basePath: string
+  ownerPath: string
   user: { id: string; displayName: string; slug: string | null; createdAt: number }
   logout: () => Promise<void>
 }) {
-  const { messages, loading, sending, sendMessage } = useChat(basePath)
+  const { messages, loading, sending, sendMessage, addToolResult } = useChat(basePath)
   const { keyboardHeight, isKeyboardOpen } = useVirtualKeyboard()
 
   return (
@@ -50,12 +54,17 @@ function ChatPageInner({
       <div 
         className="flex-1 flex flex-col"
         style={{ 
-          // Adjust height when virtual keyboard is open
           height: isKeyboardOpen ? `calc(100vh - ${keyboardHeight}px)` : undefined 
         }}
       >
         <MessageList messages={messages} loading={loading} sending={sending} />
-        <ChatInput onSend={sendMessage} disabled={sending} />
+        <ChatInput
+          onSend={sendMessage}
+          disabled={sending}
+          ownerPath={ownerPath}
+          basePath={basePath}
+          addToolResult={addToolResult}
+        />
       </div>
     </motion.div>
   )

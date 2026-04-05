@@ -1,14 +1,33 @@
-import { useState, useRef, useCallback, type KeyboardEvent } from 'react'
+import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 'react'
 import { cn } from '../../lib/utils'
+import { searchCapabilities, invokeToolDirect, type ToolSearchResult } from '../../lib/api'
+import { ToolSearchOverlay } from './tool-search-overlay'
+import { SchemaForm } from './schema-form'
 
 interface ChatInputProps {
   onSend: (text: string) => void
   disabled?: boolean
+  ownerPath: string
+  basePath: string
+  addToolResult: (toolSlug: string, result: unknown, success: boolean) => void
 }
 
-export function ChatInput({ onSend, disabled }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  disabled,
+  ownerPath,
+  basePath,
+  addToolResult,
+}: ChatInputProps) {
   const [value, setValue] = useState('')
+  const [mode, setMode] = useState<'chat' | 'form'>('chat')
+  const [searchResults, setSearchResults] = useState<ToolSearchResult[]>([])
+  const [showOverlay, setShowOverlay] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(0)
+  const [selectedTool, setSelectedTool] = useState<ToolSearchResult | null>(null)
+  const [submitting, setSubmitting] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const autoResize = useCallback(() => {
     const el = textareaRef.current
@@ -27,33 +46,160 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     if (!text || disabled) return
     onSend(text)
     setValue('')
+    setShowOverlay(false)
+    setSearchResults([])
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
   }, [value, disabled, onSend])
 
+  const dismissOverlay = useCallback(() => {
+    setShowOverlay(false)
+    setSearchResults([])
+    setActiveIndex(0)
+  }, [])
+
+  const selectTool = useCallback((tool: ToolSearchResult) => {
+    setSelectedTool(tool)
+    setMode('form')
+    setShowOverlay(false)
+    setSearchResults([])
+    setValue('')
+    setActiveIndex(0)
+  }, [])
+
+  const cancelForm = useCallback(() => {
+    setMode('chat')
+    setSelectedTool(null)
+    setTimeout(() => textareaRef.current?.focus(), 0)
+  }, [])
+
+  const handleFormSubmit = useCallback(
+    async (args: Record<string, unknown>) => {
+      if (!selectedTool) return
+      setSubmitting(true)
+      try {
+        const toolBasePath = `/${ownerPath.replace(/^\//, '')}/${selectedTool.agentSlug}`
+        const data = await invokeToolDirect(toolBasePath, selectedTool.slug, args)
+        addToolResult(selectedTool.slug, data.result ?? data.error, data.success)
+      } catch (err) {
+        addToolResult(selectedTool.slug, String(err), false)
+      } finally {
+        setSubmitting(false)
+        cancelForm()
+      }
+    },
+    [selectedTool, ownerPath, addToolResult, cancelForm],
+  )
+
+  // Debounced search
+  const doSearch = useCallback(
+    (query: string) => {
+      if (searchTimer.current) clearTimeout(searchTimer.current)
+      if (query.length < 2) {
+        dismissOverlay()
+        return
+      }
+      searchTimer.current = setTimeout(async () => {
+        try {
+          const results = await searchCapabilities(ownerPath, query)
+          setSearchResults(results)
+          setShowOverlay(results.length > 0)
+          setActiveIndex(0)
+        } catch {
+          dismissOverlay()
+        }
+      }, 300)
+    },
+    [ownerPath, dismissOverlay],
+  )
+
+  // Cleanup timer
+  useEffect(() => {
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current)
+    }
+  }, [])
+
+  const handleChange = useCallback(
+    (text: string) => {
+      setValue(text)
+      doSearch(text.startsWith('/') ? text.slice(1) : text)
+    },
+    [doSearch],
+  )
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      // Overlay navigation
+      if (showOverlay && searchResults.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault()
+          setActiveIndex(i => (i + 1) % searchResults.length)
+          return
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          setActiveIndex(i => (i - 1 + searchResults.length) % searchResults.length)
+          return
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          selectTool(searchResults[activeIndex])
+          return
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          dismissOverlay()
+          return
+        }
+      }
+
+      // Normal chat
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
         handleSend()
       }
     },
-    [handleSend],
+    [showOverlay, searchResults, activeIndex, selectTool, dismissOverlay, handleSend],
   )
 
+  // Form mode
+  if (mode === 'form' && selectedTool) {
+    return (
+      <div className="bg-surface/80 backdrop-blur-xl border-t border-white/[0.05] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] flex-shrink-0">
+        <div className="max-w-3xl mx-auto">
+          <SchemaForm
+            tool={selectedTool}
+            onSubmit={handleFormSubmit}
+            onCancel={cancelForm}
+            submitting={submitting}
+          />
+        </div>
+      </div>
+    )
+  }
+
+  // Chat mode
   return (
-    <div className="bg-surface/80 backdrop-blur-xl border-t border-white/[0.05] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] flex-shrink-0">
-      <div className="flex gap-2 max-w-3xl mx-auto items-end">
+    <div className="bg-surface/80 backdrop-blur-xl border-t border-white/[0.05] px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] flex-shrink-0 relative">
+      <div className="flex gap-2 max-w-3xl mx-auto items-end relative">
+        <ToolSearchOverlay
+          results={searchResults}
+          visible={showOverlay}
+          activeIndex={activeIndex}
+          onSelect={selectTool}
+          onDismiss={dismissOverlay}
+        />
         <textarea
           ref={textareaRef}
           value={value}
           onChange={(e) => {
-            setValue(e.target.value)
+            handleChange(e.target.value)
             autoResize()
           }}
           onKeyDown={handleKeyDown}
-          placeholder="输入消息…"
+          placeholder="输入消息… 或搜索工具"
           maxLength={4000}
           rows={1}
           disabled={disabled}
