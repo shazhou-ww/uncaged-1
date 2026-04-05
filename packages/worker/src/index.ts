@@ -27,6 +27,7 @@ import {
 } from './sigil-routes.js'
 import { handleAuthRoutes } from './auth.js'
 import { getManifestJSON } from './pages/manifest.js'
+import { handleRunnerPair } from './runner-routes.js'
 
 // Re-export RunnerHub so wrangler can find the Durable Object class
 export { RunnerHub } from '@uncaged/core/runner-hub'
@@ -394,6 +395,17 @@ async function routeRequest(
     return new Response('Invalid routing context', { status: 400 })
   }
 
+  // ─── Runner pairing API ───
+  // POST /api/v1/runners/pair — exchange pairing code for a permanent runner token
+  if (pathname === '/api/v1/runners/pair' && request.method === 'POST') {
+    return handleRunnerPair(request, env, {
+      ownerId: routingInfo?.ownerId,
+      ownerSlug: routingInfo?.ownerSlug,
+      agentId: routingInfo?.agentId,
+      agentSlug: instanceId,
+    })
+  }
+
   // ─── Runner WebSocket ───
   // Route: /runner/ws — WebSocket upgrade for Runner clients
   if (pathname === '/runner/ws' && request.headers.get('Upgrade')?.toLowerCase() === 'websocket') {
@@ -747,6 +759,12 @@ export default {
       })
       
       const clients = buildClients(env, instanceId)
+
+      // Wire up LLM pairing context from routing info
+      clients.llm.agentId = routing.agentId || instanceId
+      clients.llm.chatKv = env.CHAT_KV
+      clients.llm.ownerSlug = routing.ownerSlug
+      clients.llm.agentSlug = instanceId
 
       // Route to appropriate handler based on normalized path
       return await routeRequest(

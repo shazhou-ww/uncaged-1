@@ -33,7 +33,12 @@ export function ChatInput({
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 120)}px`
+    
+    // Use smaller max-height on mobile (< 768px)
+    const isMobile = window.innerWidth < 768
+    const maxHeight = isMobile ? 80 : 120
+    
+    el.style.height = `${Math.min(el.scrollHeight, maxHeight)}px`
   }, [])
 
   const handleSend = useCallback(() => {
@@ -201,10 +206,12 @@ export function ChatInput({
           className={cn(
             'flex-1 bg-surface-2 rounded-[22px] px-4 py-2.5',
             'font-sans text-text placeholder:text-text-4 text-base resize-none',
-            'outline-none border-none max-h-[120px] leading-relaxed overflow-hidden',
+            'outline-none border-none leading-relaxed overflow-hidden transition-all duration-200',
             'ring-1 ring-white/[0.06] transition-shadow duration-300',
             'focus:ring-1 focus:ring-accent/60 focus:shadow-[0_0_12px_var(--color-accent-glow)]',
             'disabled:opacity-50',
+            // Mobile-specific max-height
+            'max-h-[80px] md:max-h-[120px]',
           )}
         />
         <button

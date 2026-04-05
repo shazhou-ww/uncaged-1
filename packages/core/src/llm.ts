@@ -33,6 +33,7 @@ import {
   type RecallKnowledgeArgs
 } from './tools/distill-knowledge.js'
 import { execTool, runnerListTool, handleExec, handleRunnerList, type ExecArgs } from './tools/exec.js'
+import { connectComputerTool, handleConnectComputer, type ConnectComputerArgs } from './tools/connect-computer.js'
 
 interface ToolDef {
   type: 'function'
@@ -51,6 +52,7 @@ const BUILTIN_TOOLS: ToolDef[] = [
   recallKnowledgeTool,   // knowledge recall
   askAgentTool,          // A2A agent collaboration
   spawnTaskTool,         // Baton: parallel sub-tasks
+  connectComputerTool,   // Runner pairing
 ]
 
 // ─── Static tools: always available ───
@@ -239,6 +241,10 @@ export class LlmClient {
   public batonStore?: BatonStore
   public currentBatonId?: string  // set when executing inside a Baton
   public runnerHub?: DurableObjectStub  // Runner Hub DO stub (set when RUNNER_HUB binding available)
+  public agentId?: string       // set for connect_computer pairing
+  public ownerSlug?: string     // set for connect_computer pairing
+  public agentSlug?: string     // set for connect_computer pairing
+  public chatKv?: KVNamespace   // set for connect_computer pairing
 
   constructor(
     private apiKey: string,
@@ -807,6 +813,20 @@ export class LlmClient {
         return JSON.stringify({ error: 'RunnerHub not available.', runners: [] })
       }
       return await handleRunnerList(this.runnerHub)
+    }
+
+    // ── Runner: pair a new computer ──
+    if (name === 'connect_computer') {
+      if (!this.agentId || !this.chatKv) {
+        return JSON.stringify({ error: 'Pairing not available in this context' })
+      }
+      return await handleConnectComputer(
+        args as ConnectComputerArgs,
+        this.agentId,
+        this.ownerSlug || '',
+        this.agentSlug || '',
+        this.chatKv,
+      )
     }
 
     // ── Dynamic capability tools ──

@@ -5,6 +5,7 @@ import { Header } from '../components/layout/header'
 import { MessageList } from '../components/chat/message-list'
 import { ChatInput } from '../components/chat/chat-input'
 import { useChat } from '../hooks/use-chat'
+import { useVirtualKeyboard } from '../hooks/use-virtual-keyboard'
 
 export function ChatPage() {
   const { owner, agent } = useParams<{ owner: string; agent: string }>()
@@ -40,6 +41,7 @@ function ChatPageInner({
   logout: () => Promise<void>
 }) {
   const { messages, loading, sending, sendMessage, addToolResult } = useChat(basePath)
+  const { keyboardHeight, isKeyboardOpen } = useVirtualKeyboard()
 
   return (
     <motion.div
@@ -49,14 +51,21 @@ function ChatPageInner({
       transition={{ duration: 0.4, ease: [0.25, 0.46, 0.45, 0.94] }}
     >
       <Header agentName={agentName} user={user} onLogout={logout} />
-      <MessageList messages={messages} loading={loading} sending={sending} />
-      <ChatInput
-        onSend={sendMessage}
-        disabled={sending}
-        ownerPath={ownerPath}
-        basePath={basePath}
-        addToolResult={addToolResult}
-      />
+      <div 
+        className="flex-1 flex flex-col"
+        style={{ 
+          height: isKeyboardOpen ? `calc(100vh - ${keyboardHeight}px)` : undefined 
+        }}
+      >
+        <MessageList messages={messages} loading={loading} sending={sending} />
+        <ChatInput
+          onSend={sendMessage}
+          disabled={sending}
+          ownerPath={ownerPath}
+          basePath={basePath}
+          addToolResult={addToolResult}
+        />
+      </div>
     </motion.div>
   )
 }
