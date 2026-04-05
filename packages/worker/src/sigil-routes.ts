@@ -272,6 +272,182 @@ export async function handleCapabilityQuery(
   }
 }
 
+/**
+ * Handle capability search (for frontend Tool search overlay)
+ * GET /:owner/api/v1/capabilities/search?q=...&limit=5&user_invocable=true
+ */
+export async function handleCapabilitySearch(
+  ctx: SigilRouteContext,
+  url: URL
+): Promise<Response> {
+  try {
+    const query = url.searchParams.get('q') || ''
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '5'), 20)
+    
+    if (!query.trim()) {
+      return Response.json({ results: [] })
+    }
+
+    const results: Array<{
+      slug: string
+      display_name: string
+      description: string
+      icon: string
+      category: string
+      schema: any
+    }> = []
+
+    // Primary: D1 text search
+    if (ctx.env.MEMORY_DB) {
+      const likeQuery = `%${query}%`
+      const d1Results = await ctx.env.MEMORY_DB.prepare(`
+        SELECT slug, display_name, description, tags, schema, type, visibility
+        FROM capabilities
+        WHERE owner_id = ?
+          AND (
+            slug LIKE ? COLLATE NOCASE
+            OR display_name LIKE ? COLLATE NOCASE
+            OR description LIKE ? COLLATE NOCASE
+            OR tags LIKE ? COLLATE NOCASE
+          )
+        ORDER BY access_count DESC, updated_at DESC
+        LIMIT ?
+      `).bind(ctx.ownerSlug, likeQuery, likeQuery, likeQuery, likeQuery, limit).all()
+
+      for (const row of (d1Results.results || [])) {
+        let tags: string[] = []
+        try { tags = row.tags ? JSON.parse(row.tags as string) : [] } catch {}
+        
+        let schema: any = null
+        try { schema = row.schema ? JSON.parse(row.schema as string) : null } catch {}
+
+        results.push({
+          slug: row.slug as string,
+          display_name: (row.display_name as string) || (row.slug as string),
+          description: (row.description as string) || '',
+          icon: '🔧',
+          category: tags.find((t: string) => t.startsWith('category:'))?.slice(9) || 'general',
+          schema,
+        })
+      }
+    }
+
+    // Enhancement: If D1 returned few results and Sigil semantic search is available
+    if (results.length < limit) {
+      const workerPool = createWorkerPool(ctx.env)
+      if (workerPool) {
+        try {
+          const semanticResults = await workerPool.query({
+            q: query,
+            limit: limit - results.length,
+            mode: 'find',
+          })
+
+          const existingSlugs = new Set(results.map(r => r.slug))
+          for (const item of (semanticResults.items || [])) {
+            if (existingSlugs.has(item.capability)) continue
+            const ownerTag = `owner:${ctx.ownerSlug}`
+            if (item.tags && !item.tags.includes(ownerTag)) continue
+
+            results.push({
+              slug: item.capability,
+              display_name: item.capability,
+              description: item.description || '',
+              icon: '🔧',
+              category: 'general',
+              schema: item.schema || null,
+            })
+          }
+        } catch (e) {
+          console.warn('[Capability Search] Semantic search failed:', e)
+        }
+      }
+    }
+
+    return Response.json({ results: results.slice(0, limit) })
+  } catch (error) {
+    console.error('[Capability Search]', error)
+    return Response.json({ results: [], error: 'Search failed' }, { status: 500 })
+  }
+}
+
+/**
+ * Handle direct tool invocation by user (not via LLM)
+ * POST /:owner/:agent/api/v1/tools/:slug/invoke
+ * Body: { "args": { ... } }
+ */
+export async function handleToolInvoke(
+  ctx: SigilRouteContext,
+  toolSlug: string,
+  request: Request
+): Promise<Response> {
+  try {
+    const body = await request.json() as { args?: Record<string, any> }
+    const args = body.args || {}
+
+    const workerPool = createWorkerPool(ctx.env)
+    if (workerPool) {
+      const capability = await workerPool.inspect(toolSlug)
+      if (!capability) {
+        return Response.json({ success: false, error: 'Tool not found' }, { status: 404 })
+      }
+
+      const ownerTag = `owner:${ctx.ownerSlug}`
+      if (capability.tags && !capability.tags.includes(ownerTag)) {
+        return Response.json({ success: false, error: 'Access denied' }, { status: 403 })
+      }
+
+      const invokeRequest = new Request('https://internal/invoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(args),
+      })
+
+      const result = await workerPool.invoke(toolSlug, invokeRequest)
+      const resultBody = await result.text()
+
+      let parsedResult: any
+      try { parsedResult = JSON.parse(resultBody) } catch { parsedResult = resultBody }
+
+      // Update access count
+      if (ctx.env.MEMORY_DB) {
+        ctx.env.MEMORY_DB.prepare(
+          `UPDATE capabilities SET access_count = access_count + 1, last_access = ? WHERE owner_id = ? AND slug = ?`
+        ).bind(Date.now(), ctx.ownerSlug, toolSlug).run().catch(() => {})
+      }
+
+      return Response.json({
+        success: result.status >= 200 && result.status < 300,
+        result: parsedResult,
+      })
+    }
+
+    // Fallback: check D1 for existence
+    if (ctx.env.MEMORY_DB) {
+      const cap = await ctx.env.MEMORY_DB.prepare(
+        `SELECT slug FROM capabilities WHERE owner_id = ? AND slug = ?`
+      ).bind(ctx.ownerSlug, toolSlug).first()
+
+      if (!cap) {
+        return Response.json({ success: false, error: 'Tool not found' }, { status: 404 })
+      }
+
+      return Response.json({
+        success: false,
+        error: 'Sigil execution engine not available',
+      }, { status: 503 })
+    }
+
+    return Response.json({ success: false, error: 'No execution backend configured' }, { status: 503 })
+  } catch (error) {
+    console.error('[Tool Invoke]', error)
+    return Response.json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    }, { status: 500 })
+  }
+}
+
 async function handleFullListing(ctx: SigilRouteContext, limit: number): Promise<Response> {
   if (!ctx.env.MEMORY_DB) {
     return new Response(JSON.stringify({ total: 0, items: [] }), {
