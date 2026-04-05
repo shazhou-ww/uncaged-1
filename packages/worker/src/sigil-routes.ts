@@ -49,22 +49,57 @@ export async function handleCapabilityDeploy(
     const result: DeployResult = await workerPool.deploy(enhancedParams)
 
     // Dual-write: Also store/update in D1 capabilities table
-    if (ctx.env.MEMORY_DB && result.capability) {
+    if (ctx.env.MEMORY_DB && result.capability && ctx.env.CHAT_KV) {
       try {
+        // Import SlugResolver to resolve owner_id
+        const { SlugResolver } = await import('./slug-resolver.js')
+        const slugResolver = new SlugResolver(ctx.env.MEMORY_DB, ctx.env.CHAT_KV)
+        
+        // Resolve owner_id from owner_slug
+        const ownerInfo = await slugResolver.resolveOwnerBySlug(ctx.ownerSlug)
+        if (!ownerInfo) {
+          console.warn(`[Sigil] Failed to resolve owner_id for slug: ${ctx.ownerSlug}`)
+          throw new Error(`Owner not found: ${ctx.ownerSlug}`)
+        }
+
+        // Generate UUID for capability id (or reuse if re-deploying)
+        let capabilityId = crypto.randomUUID()
+        let createdAt = Date.now()
+        
+        // First, try to find existing capability by owner_id + slug
+        const existing = await ctx.env.MEMORY_DB.prepare(`
+          SELECT id, created_at FROM capabilities WHERE owner_id = ? AND slug = ?
+        `).bind(ownerInfo.ownerId, result.capability).first<{ id: string; created_at: number }>()
+        
+        if (existing) {
+          capabilityId = existing.id
+          createdAt = existing.created_at
+        }
+
         await ctx.env.MEMORY_DB.prepare(`
           INSERT OR REPLACE INTO capabilities (
-            owner_id, slug, name, description, 
-            input_schema, example_input, example_output,
+            id, owner_id, slug, display_name, description, tags, examples, schema,
+            execute, code, type, visibility, ttl, access_count, last_access,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).bind(
-          ctx.ownerSlug,
-          result.capability, 
-          deployParams.name || result.capability,
-          deployParams.description || '',
-          JSON.stringify(deployParams.schema || {}),
-          JSON.stringify(deployParams.examples?.[0] || {}),
-          JSON.stringify({})  // No example_output in DeployParams
+          capabilityId,                                           // id: UUID (reuse if re-deploying)
+          ownerInfo.ownerId,                                      // owner_id: resolve from owner slug
+          result.capability,                                      // slug: capability name from deploy result
+          deployParams.name || deployParams.description || result.capability, // display_name: from deploy params
+          deployParams.description || '',                        // description: from deploy params
+          JSON.stringify(deployParams.tags || []),               // tags: JSON.stringify(tags array)
+          JSON.stringify(deployParams.examples || []),           // examples: JSON.stringify(examples array)
+          JSON.stringify(deployParams.schema || {}),             // schema: JSON.stringify(schema object)
+          deployParams.execute || null,                          // execute: from deploy params
+          deployParams.code || null,                             // code: from deploy params (if code mode)
+          deployParams.type || 'normal',                         // type: from deploy params
+          'private',                                             // visibility: 'private' (default for user-deployed)
+          deployParams.ttl || null,                              // ttl: from deploy params
+          0,                                                     // access_count: 0
+          null,                                                  // last_access: null
+          createdAt,                                             // created_at: preserve if re-deploying
+          Date.now()                                             // updated_at: Date.now()
         ).run()
         
         console.log(`[Sigil] Synced capability ${result.capability} to D1`)

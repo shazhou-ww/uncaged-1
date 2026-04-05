@@ -223,4 +223,37 @@ export class SlugResolver {
 
     return resolved
   }
+
+  /**
+   * Resolve owner slug by agent slug: used for legacy redirects
+   * Returns owner slug for a given agent slug, or null if not found
+   */
+  async resolveOwnerByAgentSlug(agentSlug: string): Promise<string | null> {
+    const cacheKey = `agent-owner:${agentSlug}`
+    
+    // 1. Check KV cache first
+    const cached = await this.kv.get(cacheKey)
+    if (cached !== null) {
+      return cached === '' ? null : cached // Empty string means no owner found
+    }
+
+    // 2. Query D1: find owner slug by agent slug
+    const result = await this.db
+      .prepare(`
+        SELECT u.slug as owner_slug 
+        FROM users u 
+        JOIN agents a ON a.owner_id = u.id 
+        WHERE a.slug = ?
+      `)
+      .bind(agentSlug)
+      .first<{ owner_slug: string }>()
+
+    const ownerSlug = result?.owner_slug || null
+
+    // 3. Cache result (cache null as empty string)
+    const ttl = ownerSlug ? 3600 : 300 // 1 hour for found, 5 min for not found
+    await this.kv.put(cacheKey, ownerSlug || '', { expirationTtl: ttl })
+
+    return ownerSlug
+  }
 }

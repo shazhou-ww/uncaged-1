@@ -225,16 +225,13 @@ function handleLegacyRedirect(request: Request): Response | null {
   
   // Only handle legacy subdomains
   if (hostname.endsWith('.shazhou.work') && hostname !== 'uncaged.shazhou.work') {
-    const instanceId = hostname.split('.')[0]
-    
     // Skip if it's a known existing endpoint that should continue working
     if (url.pathname === '/webhook') {
-      return null // Let it continue to work
+      return null // Let it continue to work with legacy hostname routing
     }
     
-    // For Phase 1, hardcode owner as "scott"
-    const newUrl = `${url.protocol}//uncaged.shazhou.work/scott/${instanceId}${url.pathname}${url.search}`
-    return Response.redirect(newUrl, 301)
+    // For other paths, defer to main routing flow (after SlugResolver setup)
+    return null
   }
   
   return null
@@ -457,6 +454,31 @@ export default {
     
     // Legacy hostname-based routing for backward compatibility
     const hostname = url.hostname
+    
+    // Handle legacy domain redirects using SlugResolver
+    if (hostname.endsWith('.shazhou.work') && hostname !== 'uncaged.shazhou.work') {
+      const agentSlug = hostname.split('.')[0]
+      
+      // Skip webhook path — must continue working with legacy routing
+      if (url.pathname === '/webhook') {
+        // Fall through to legacy hostname-based routing
+      } else {
+        // Use SlugResolver to look up agent's owner
+        if (env.MEMORY_DB && env.CHAT_KV) {
+          const slugResolver = new SlugResolver(env.MEMORY_DB, env.CHAT_KV)
+          const ownerSlug = await slugResolver.resolveOwnerByAgentSlug(agentSlug)
+          
+          if (ownerSlug) {
+            // Redirect to uncaged.shazhou.work/{owner_slug}/{agent_slug}{path}{search}
+            const newUrl = `${url.protocol}//uncaged.shazhou.work/${ownerSlug}/${agentSlug}${url.pathname}${url.search}`
+            return Response.redirect(newUrl, 301)
+          }
+          // If agent not found in DB, fall back to legacy hostname-based routing (don't break)
+        }
+      }
+    }
+    
+    // Legacy hostname-based routing for backward compatibility
     const sub = hostname.split('.')[0]
     const instanceId = sub === 'localhost' || sub === 'uncaged' ? 'doudou' : sub
     
