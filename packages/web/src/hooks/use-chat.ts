@@ -1,9 +1,11 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import {
   sendMessage as apiSendMessage,
+  sendMessageStream as apiSendMessageStream,
   loadHistory as apiLoadHistory,
   clearHistory as apiClearHistory,
   type ChatMessage,
+  type StreamEvent,
 } from '../lib/api'
 
 interface ChatState {
@@ -35,28 +37,86 @@ export function useChat(basePath: string): ChatState {
   }, [])
 
   const sendMessage = useCallback(async (text: string) => {
+    // Add user message immediately
     const userMsg: ChatMessage = {
       role: 'user',
       content: text,
       timestamp: Date.now(),
     }
-    setMessages((prev) => [...prev, userMsg])
+    setMessages(prev => [...prev, userMsg])
     setSending(true)
+
+    // Create a placeholder assistant message for streaming
+    const assistantMsg: ChatMessage = {
+      role: 'assistant',
+      content: '',
+      timestamp: Date.now(),
+    }
+    setMessages(prev => [...prev, assistantMsg])
+
     try {
-      const data = await apiSendMessage(basePathRef.current, text)
-      const assistantMsg: ChatMessage = {
-        role: 'assistant',
-        content: data.response,
-        timestamp: data.timestamp,
-      }
-      setMessages((prev) => [...prev, assistantMsg])
+      await apiSendMessageStream(basePathRef.current, text, (event: StreamEvent) => {
+        if (event.type === 'token') {
+          // Append token to last assistant message
+          setMessages(prev => {
+            const msgs = [...prev]
+            const last = msgs[msgs.length - 1]
+            if (last.role === 'assistant') {
+              msgs[msgs.length - 1] = {
+                ...last,
+                content: (typeof last.content === 'string' ? last.content : '') + event.text,
+              }
+            }
+            return msgs
+          })
+        }
+        if (event.type === 'tool_start') {
+          // Add tool_call info to assistant message
+          setMessages(prev => {
+            const msgs = [...prev]
+            const lastAssistant = msgs.findLast(m => m.role === 'assistant')
+            if (lastAssistant) {
+              const existing = lastAssistant.tool_calls || []
+              lastAssistant.tool_calls = [...existing, {
+                id: `tc_${Date.now()}`,
+                type: 'function',
+                function: { name: event.name, arguments: event.arguments },
+              }]
+            }
+            return [...msgs]  // force re-render
+          })
+        }
+        if (event.type === 'tool_result') {
+          // Add tool result message
+          setMessages(prev => [...prev, {
+            role: 'tool',
+            content: event.content,
+            tool_call_id: `tc_${Date.now()}`,
+            timestamp: Date.now(),
+          }])
+        }
+        if (event.type === 'error') {
+          // Replace assistant message with error
+          setMessages(prev => {
+            const msgs = [...prev]
+            const last = msgs[msgs.length - 1]
+            if (last.role === 'assistant') {
+              msgs[msgs.length - 1] = { ...last, content: event.message }
+            }
+            return msgs
+          })
+        }
+        // event.type === 'done' doesn't need special handling
+      })
     } catch {
-      const errMsg: ChatMessage = {
-        role: 'assistant',
-        content: '抱歉，遇到了问题，请稍后重试 😥',
-        timestamp: Date.now(),
-      }
-      setMessages((prev) => [...prev, errMsg])
+      setMessages(prev => {
+        const msgs = [...prev]
+        const last = msgs[msgs.length - 1]
+        if (last.role === 'assistant' && !last.content) {
+          msgs[msgs.length - 1] = { ...last, content: '抱歉，遇到了问题，请稍后重试 😥' }
+        }
+        return msgs
+      })
     } finally {
       setSending(false)
     }

@@ -1,7 +1,7 @@
 import { motion } from 'motion/react'
 import { cn } from '../../lib/utils'
 import { ToolCall } from './tool-call'
-import type { ChatMessage, ContentPart } from '../../lib/api'
+import type { ChatMessage, ContentPart, ToolCall as ToolCallType } from '../../lib/api'
 
 interface MessageBubbleProps {
   message: ChatMessage
@@ -43,57 +43,105 @@ function renderMarkdown(text: string): string {
   return html
 }
 
-function renderContent(content: string | ContentPart[]): JSX.Element {
+function renderContent(content: string | ContentPart[], toolCalls?: ToolCallType[]): JSX.Element {
+  const elements: JSX.Element[] = []
+  
+  // Render main content
   if (typeof content === 'string') {
-    return <div dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
-  }
-
-  if (Array.isArray(content)) {
-    return (
-      <>
-        {content.map((part, i) => {
-          if (part.type === 'text' && part.text) {
-            return (
-              <div
-                key={i}
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(part.text) }}
-              />
-            )
-          }
-          if (part.type === 'tool_use') {
-            return (
-              <ToolCall
-                key={i}
-                name={part.name || 'tool'}
-                input={part.input}
-              />
-            )
-          }
-          if (part.type === 'tool_result') {
-            return (
-              <ToolCall
-                key={i}
-                name="结果"
-                result={
-                  typeof part.content === 'string'
-                    ? part.content
-                    : JSON.stringify(part.content, null, 2)
-                }
-                icon="📋"
-              />
-            )
-          }
-          return null
-        })}
-      </>
+    elements.push(
+      <div key="content" dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
     )
+  } else if (Array.isArray(content)) {
+    content.forEach((part, i) => {
+      if (part.type === 'text' && part.text) {
+        elements.push(
+          <div
+            key={`text-${i}`}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(part.text) }}
+          />
+        )
+      } else if (part.type === 'tool_use') {
+        elements.push(
+          <ToolCall
+            key={`tool-use-${i}`}
+            name={part.name || 'tool'}
+            input={part.input}
+          />
+        )
+      } else if (part.type === 'tool_result') {
+        elements.push(
+          <ToolCall
+            key={`tool-result-${i}`}
+            name="结果"
+            result={
+              typeof part.content === 'string'
+                ? part.content
+                : JSON.stringify(part.content, null, 2)
+            }
+            icon="📋"
+          />
+        )
+      }
+    })
   }
-
-  return <></>
+  
+  // Render tool calls if present
+  if (toolCalls && toolCalls.length > 0) {
+    toolCalls.forEach((toolCall, i) => {
+      let parsedArgs: Record<string, unknown> = {}
+      try {
+        parsedArgs = JSON.parse(toolCall.function.arguments)
+      } catch {
+        parsedArgs = { arguments: toolCall.function.arguments }
+      }
+      
+      elements.push(
+        <ToolCall
+          key={`tool-call-${i}`}
+          name={toolCall.function.name}
+          input={parsedArgs}
+          icon="🔧"
+        />
+      )
+    })
+  }
+  
+  return <>{elements}</>
 }
 
 export function MessageBubble({ message, index = 0 }: MessageBubbleProps) {
   const isUser = message.role === 'user'
+  const isTool = message.role === 'tool'
+
+  // Tool messages should be rendered differently
+  if (isTool) {
+    return (
+      <motion.div
+        className="flex gap-2.5 max-w-[85%] md:max-w-[75%] self-start"
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{
+          duration: 0.4,
+          delay: Math.min(index * 0.05, 0.3),
+          ease: [0.25, 0.46, 0.45, 0.94],
+        }}
+      >
+        <div className="w-8 h-8 rounded-full flex-shrink-0 flex items-center justify-center text-xl bg-white/[0.05] border border-white/[0.06]">
+          📋
+        </div>
+        <div className="flex flex-col gap-0.5 items-start flex-1">
+          <ToolCall
+            name="工具结果"
+            result={typeof message.content === 'string' ? message.content : JSON.stringify(message.content, null, 2)}
+            icon="📋"
+          />
+          <span className="text-[0.7rem] text-text-4 px-1">
+            {formatTime(message.timestamp)}
+          </span>
+        </div>
+      </motion.div>
+    )
+  }
 
   return (
     <motion.div
@@ -130,7 +178,7 @@ export function MessageBubble({ message, index = 0 }: MessageBubbleProps) {
           {isUser ? (
             <span>{typeof message.content === 'string' ? message.content : ''}</span>
           ) : (
-            renderContent(message.content)
+            renderContent(message.content, message.tool_calls)
           )}
         </div>
         <span className="text-[0.7rem] text-text-4 px-1">
