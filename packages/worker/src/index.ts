@@ -521,10 +521,14 @@ async function routeRequest(
 
   // ─── Web channel (legacy OAuth + UI + API) ───
   const webEnabled = env.GOOGLE_CLIENT_ID && isWebInstance(env, instanceId)
-  if (
-    pathname.startsWith('/auth/') ||
-    pathname.startsWith('/api/')
-  ) {
+
+  // ─── Auth routes: always available (not gated by webEnabled) ───
+  if (pathname.startsWith('/auth/')) {
+    const authResponse = await handleAuthRoutes(request, env, pathname)
+    if (authResponse) return authResponse
+  }
+
+  if (pathname.startsWith('/api/')) {
     if (!webEnabled) {
       return new Response('Web channel not configured for this instance', { status: 404 })
     }
