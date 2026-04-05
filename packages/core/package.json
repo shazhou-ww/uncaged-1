@@ -54,6 +54,10 @@
       "types": "./dist/utils.d.ts",
       "default": "./dist/utils.js"
     },
+    "./short-id": {
+      "types": "./dist/short-id.d.ts",
+      "default": "./dist/short-id.js"
+    },
     "./tools/*": {
       "types": "./dist/tools/*.d.ts",
       "default": "./dist/tools/*.js"

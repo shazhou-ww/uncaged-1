@@ -1,7 +1,5 @@
 // Unified Uncaged Worker — one codebase, N agent instances
-// Phase 1: Dual routing support
-//   - New path-based: uncaged.shazhou.work/:owner/:agent/... → agent instanceId
-//   - Legacy hostname: doudou.shazhou.work/... → doudou instanceId (backward compat)
+// Phase 2: Slug resolution and short ID routing with D1 database
 
 import type { Env } from '@uncaged/core/env'
 import { SigilClient } from '@uncaged/core/sigil'
@@ -15,6 +13,7 @@ import { IdentityResolver } from '@uncaged/core/identity'
 import { handleCommonRoutes, type CoreClients } from './router.js'
 import { handleTelegramRoutes, sendTelegram } from './channels/telegram.js'
 import { handleWebRoutes } from './channels/web.js'
+import { SlugResolver } from './slug-resolver.js'
 
 // Unified environment — all channel secrets are optional
 export interface WorkerEnv extends Env {
@@ -44,46 +43,109 @@ function isWebInstance(env: WorkerEnv, instanceId: string): boolean {
   return allowed.has(instanceId)
 }
 
-/** Extract instanceId from hostname or path based on domain */
-function resolveInstanceId(request: Request): string {
-  const url = new URL(request.url)
-  const hostname = url.hostname
-  
-  // New path-based routing for uncaged.shazhou.work
-  if (hostname === 'uncaged.shazhou.work') {
-    // Extract from path: /owner/agent/... → agent
-    const pathSegments = url.pathname.split('/').filter(Boolean)
-    if (pathSegments.length >= 2) {
-      return pathSegments[1] // Return the agent slug
-    }
-    // If path doesn't match pattern, return empty (will result in 404)
-    return ''
+/** Resolve routing path to instanceId using SlugResolver */
+async function resolveRouting(
+  env: WorkerEnv,
+  pathname: string
+): Promise<{ instanceId: string; redirect?: string } | null> {
+  if (!env.MEMORY_DB || !env.CHAT_KV) {
+    console.error('[Routing] MEMORY_DB or CHAT_KV not configured')
+    return null
   }
-  
-  // Legacy hostname-based routing for backward compatibility
-  const sub = hostname.split('.')[0]
-  // Fallback for localhost / workers.dev
-  return sub === 'localhost' || sub === 'uncaged' ? 'doudou' : sub
+
+  const slugResolver = new SlugResolver(env.MEMORY_DB, env.CHAT_KV)
+
+  // Handle /id/ routing
+  if (pathname.startsWith('/id/')) {
+    const idRoute = parseIdRoute(pathname)
+    if (!idRoute) return null
+
+    const resolved = await slugResolver.resolveById(idRoute.ownerShortId, idRoute.agentShortId)
+    if (!resolved) return null
+
+    // For backward compatibility, use agent slug as instanceId
+    return { instanceId: resolved.agentSlug }
+  }
+
+  // Handle slug routing
+  const slugRoute = parseSlugRoute(pathname)
+  if (!slugRoute) return null
+
+  // Check for redirects first
+  const ownerRedirect = await slugResolver.checkRedirect('user', slugRoute.ownerSlug)
+  if (ownerRedirect) {
+    return { 
+      instanceId: '', 
+      redirect: `/${ownerRedirect}/${slugRoute.agentSlug}` 
+    }
+  }
+
+  const agentRedirect = await slugResolver.checkRedirect('agent', slugRoute.agentSlug)
+  if (agentRedirect) {
+    return { 
+      instanceId: '', 
+      redirect: `/${slugRoute.ownerSlug}/${agentRedirect}` 
+    }
+  }
+
+  // Resolve current slugs
+  const resolved = await slugResolver.resolveBySlug(slugRoute.ownerSlug, slugRoute.agentSlug)
+  if (!resolved) return null
+
+  // For backward compatibility, use agent slug as instanceId
+  return { instanceId: resolved.agentSlug }
 }
 
-/** Remove /:owner/:agent prefix from pathname for path-based routing */
-function stripRoutePrefix(url: URL): string {
+/** Remove routing prefix from pathname */
+function stripRoutePrefix(url: URL, isIdRoute: boolean): string {
   if (url.hostname === 'uncaged.shazhou.work') {
     const pathSegments = url.pathname.split('/').filter(Boolean)
-    if (pathSegments.length >= 2) {
-      // Remove first two segments (/owner/agent) and reconstruct path
-      const remainingSegments = pathSegments.slice(2)
-      return remainingSegments.length > 0 ? `/${remainingSegments.join('/')}` : '/'
+    
+    if (isIdRoute) {
+      // Remove /id/owner_short_id/agent_short_id prefix
+      if (pathSegments.length >= 3 && pathSegments[0] === 'id') {
+        const remainingSegments = pathSegments.slice(3)
+        return remainingSegments.length > 0 ? `/${remainingSegments.join('/')}` : '/'
+      }
+    } else {
+      // Remove /owner/agent prefix  
+      if (pathSegments.length >= 2) {
+        const remainingSegments = pathSegments.slice(2)
+        return remainingSegments.length > 0 ? `/${remainingSegments.join('/')}` : '/'
+      }
     }
   }
-  // For legacy domains or when not path-based, return original pathname
+  // For legacy domains, return original pathname
   return url.pathname
 }
 
 /** Check if path matches reserved platform prefixes */
 function isReservedPrefix(pathname: string): boolean {
-  const reservedPrefixes = ['/auth/', '/admin/', '/platform/', '/id/', '/.well-known/']
+  // Note: /id/ is NOT reserved — it's handled by SlugResolver for short ID routing
+  const reservedPrefixes = ['/auth/', '/admin/', '/platform/', '/.well-known/']
   return reservedPrefixes.some(prefix => pathname.startsWith(prefix))
+}
+
+/** Parse /id/ routing path */
+function parseIdRoute(pathname: string): { ownerShortId: string; agentShortId: string } | null {
+  // Match /id/:owner_short_id/:agent_short_id/...
+  const match = pathname.match(/^\/id\/([^\/]+)\/([^\/]+)(?:\/.*)?$/)
+  if (!match) return null
+  return {
+    ownerShortId: match[1],
+    agentShortId: match[2]
+  }
+}
+
+/** Parse slug routing path */  
+function parseSlugRoute(pathname: string): { ownerSlug: string; agentSlug: string } | null {
+  // Match /:owner_slug/:agent_slug/...
+  const pathSegments = pathname.split('/').filter(Boolean)
+  if (pathSegments.length < 2) return null
+  return {
+    ownerSlug: pathSegments[0],
+    agentSlug: pathSegments[1]
+  }
 }
 
 /** Handle legacy domain redirects */
@@ -183,22 +245,27 @@ export default {
     if (url.hostname === 'uncaged.shazhou.work') {
       // Check reserved prefixes first - these bypass agent routing
       if (isReservedPrefix(url.pathname)) {
-        // Reserved prefixes not implemented in Phase 1
+        // Reserved prefixes not implemented in Phase 2
         return new Response('Reserved path not implemented', { status: 404 })
       }
       
-      // Parse path for agent routing: /:owner/:agent/...
-      const pathSegments = url.pathname.split('/').filter(Boolean)
-      if (pathSegments.length < 2) {
-        return new Response('Invalid path format. Expected: /:owner/:agent/...', { status: 404 })
+      // Resolve routing using SlugResolver
+      const routing = await resolveRouting(env, url.pathname)
+      if (!routing) {
+        return new Response('Agent not found', { status: 404 })
       }
       
-      // Extract owner and agent from path
-      const owner = pathSegments[0]
-      const agent = pathSegments[1]
+      // Handle redirects
+      if (routing.redirect) {
+        const redirectUrl = `${url.protocol}//${url.host}${routing.redirect}${url.search}`
+        return Response.redirect(redirectUrl, 301)
+      }
+      
+      const instanceId = routing.instanceId
+      const isIdRoute = url.pathname.startsWith('/id/')
       
       // Create a modified URL with the stripped path for downstream handlers
-      const strippedPath = stripRoutePrefix(url)
+      const strippedPath = stripRoutePrefix(url, isIdRoute)
       const modifiedUrl = new URL(request.url)
       modifiedUrl.pathname = strippedPath
       
@@ -209,15 +276,17 @@ export default {
         body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
       })
       
-      const instanceId = agent
       const clients = buildClients(env, instanceId)
 
       // Route to appropriate handler based on stripped path
       return await routeRequest(modifiedRequest, env, clients, instanceId, ctx, strippedPath)
     }
     
-    // Legacy hostname-based routing
-    const instanceId = resolveInstanceId(request)
+    // Legacy hostname-based routing for backward compatibility
+    const hostname = url.hostname
+    const sub = hostname.split('.')[0]
+    const instanceId = sub === 'localhost' || sub === 'uncaged' ? 'doudou' : sub
+    
     if (!instanceId) {
       return new Response('Invalid instance', { status: 404 })
     }
