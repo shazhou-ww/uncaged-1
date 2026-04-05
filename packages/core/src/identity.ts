@@ -59,8 +59,8 @@ export class IdentityResolver {
         this.db.prepare('INSERT INTO users (id, display_name, created_at) VALUES (?, ?, ?)').bind(userId, displayName, now),
         this.db.prepare('INSERT INTO credentials (id, user_id, type, external_id, created_at) VALUES (?, ?, ?, ?, ?)').bind(credentialId, userId, authType, externalId, now),
         this.db.prepare('INSERT OR IGNORE INTO agents (id, created_at) VALUES (?, ?)').bind(agentId, now),
-        this.db.prepare('INSERT INTO agent_users (agent_id, user_id, role, created_at) VALUES (?, ?, ?, ?)').bind(agentId, userId, 'guest', now),
-        this.db.prepare('INSERT INTO channels (id, agent_id, user_id, type, external_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(channelId, agentId, userId, channelType, channelExternalId, now),
+        this.db.prepare('INSERT OR IGNORE INTO agent_users (agent_id, user_id, role, created_at) VALUES (?, ?, ?, ?)').bind(agentId, userId, 'guest', now),
+        this.db.prepare('INSERT OR IGNORE INTO channels (id, agent_id, user_id, type, external_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(channelId, agentId, userId, channelType, channelExternalId, now),
       ])
 
       return {
@@ -107,7 +107,7 @@ export class IdentityResolver {
     if (!agentUser) {
       // Edge case: credential exists but user has no relationship with this agent
       stmts.push(
-        this.db.prepare('INSERT INTO agent_users (agent_id, user_id, role, created_at) VALUES (?, ?, ?, ?)').bind(agentId, userId, 'guest', now),
+        this.db.prepare('INSERT OR IGNORE INTO agent_users (agent_id, user_id, role, created_at) VALUES (?, ?, ?, ?)').bind(agentId, userId, 'guest', now),
       )
     } else {
       role = agentUser.role as UserRole
@@ -117,7 +117,7 @@ export class IdentityResolver {
       // Edge case: user exists for agent but no channel record for this channel type
       channelId = crypto.randomUUID()
       stmts.push(
-        this.db.prepare('INSERT INTO channels (id, agent_id, user_id, type, external_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(channelId, agentId, userId, channelType, channelExternalId, now),
+        this.db.prepare('INSERT OR IGNORE INTO channels (id, agent_id, user_id, type, external_id, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(channelId, agentId, userId, channelType, channelExternalId, now),
       )
     } else {
       channelId = channel.id
@@ -168,6 +168,9 @@ export class IdentityResolver {
         .bind(agentId, ownerId ?? null, now),
     ]
     if (ownerId) {
+      stmts.push(
+        this.db.prepare('UPDATE agents SET owner_id = ? WHERE id = ? AND owner_id IS NULL').bind(ownerId, agentId),
+      )
       stmts.push(
         this.db
           .prepare(

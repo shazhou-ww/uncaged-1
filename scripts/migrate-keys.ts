@@ -13,6 +13,8 @@
  *   const result = await executeMigration(env.MEMORY_DB, env.CHAT_KV, plan)
  */
 
+import { parseLegacyChatKey, parseLegacyMemorySession } from '@uncaged/core/chat-key'
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -51,36 +53,11 @@ export interface MigrationResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse a legacy memory session tag into its channel type and identifier.
- */
-function parseLegacySession(session: string): {
-  type: 'telegram' | 'instance' | 'unified' | 'unknown'
-  name: string
-} | null {
-  if (session.startsWith('user:')) return { type: 'unified', name: session.slice(5) }
-  if (session.startsWith('telegram:')) return { type: 'telegram', name: session.slice(9) }
-  if (session.includes(':')) return { type: 'instance', name: session.split(':').slice(1).join(':') }
-  return null
-}
-
-/**
- * Parse a legacy KV chat key (the part after "chat:").
- */
-function parseLegacyChatKey(chatId: string): {
-  type: 'telegram' | 'web' | 'api' | 'unknown'
-  externalId: string
-} | null {
-  if (/^\d+$/.test(chatId)) return { type: 'telegram', externalId: chatId }
-  if (chatId.startsWith('web:')) return { type: 'web', externalId: chatId.slice(4) }
-  if (chatId === 'api') return { type: 'api', externalId: 'api' }
-  return null
-}
-
-/**
  * Look up the unified userId for a credential.
  *
  * Queries the `credentials` table which is expected to have:
- *   user_id, type ('telegram' | 'google' | ...), external_id, display_name
+ *   user_id, type ('telegram' | 'google' | ...), external_id
+ * Falls back to matching display_name from the `users` table.
  */
 async function resolveUserId(
   db: D1Database,
@@ -100,7 +77,7 @@ async function resolveUserId(
   // Fallback: try display_name match (for "telegram:Scott" where "Scott" is the display name)
   const byName = await db
     .prepare(
-      `SELECT user_id FROM credentials WHERE type = ? AND display_name = ? LIMIT 1`,
+      `SELECT c.user_id FROM credentials c JOIN users u ON u.id = c.user_id WHERE c.type = ? AND u.display_name = ? LIMIT 1`,
     )
     .bind(type, identifier)
     .first<{ user_id: string }>()
@@ -110,7 +87,7 @@ async function resolveUserId(
   // Last resort: name-only lookup across all credential types
   const byAnyName = await db
     .prepare(
-      `SELECT user_id FROM credentials WHERE display_name = ? LIMIT 1`,
+      `SELECT c.user_id FROM credentials c JOIN users u ON u.id = c.user_id WHERE u.display_name = ? LIMIT 1`,
     )
     .bind(identifier)
     .first<{ user_id: string }>()
@@ -151,7 +128,7 @@ export async function generateMigrationPlan(
     // Already migrated?
     if (chatId.startsWith('user:')) continue
 
-    const parsed = parseLegacySession(chatId)
+    const parsed = parseLegacyMemorySession(chatId)
     if (!parsed) {
       unmapped.push({ instanceId, chatId, reason: 'unrecognized format' })
       continue

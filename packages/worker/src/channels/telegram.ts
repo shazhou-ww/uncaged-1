@@ -58,6 +58,10 @@ export async function handleTelegramRoutes(
     return new Response('ok')
   }
 
+  // Note: msg.from can be undefined for channel posts. Fallback to rawChatId means
+  // all messages from a channel would map to the same "user". Currently only private
+  // chats are supported (ALLOWED_CHAT_IDS whitelist), so this is acceptable.
+
   // ─── Resolve identity (with fallback to legacy keys) ───
   let chatId: string | number = rawChatId
   let memorySessionId = `telegram:${userTag}`

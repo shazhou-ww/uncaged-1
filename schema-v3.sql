@@ -1,6 +1,8 @@
 -- Uncaged D1 Schema v3: User Model & Multi-Tenant Identity
 -- Phase 0 of Issue #21 — unified user identity across channels
 -- All timestamps in milliseconds (Date.now())
+-- Note: created_at values are set by application code (Date.now() in TypeScript),
+-- not by DB defaults. This avoids D1 compatibility concerns with unixepoch().
 
 -- Users: canonical identity, one per human
 CREATE TABLE IF NOT EXISTS users (
