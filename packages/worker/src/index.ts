@@ -170,6 +170,18 @@ function stripRoutePrefix(url: URL, isIdRoute: boolean): string {
   return url.pathname
 }
 
+/** Normalize API versioned paths to legacy paths */
+function normalizeApiPath(pathname: string): string {
+  // Strip /api/v1 prefix if present
+  if (pathname.startsWith('/api/v1/')) {
+    return pathname.slice(7) // '/api/v1/chat' → '/chat'
+  }
+  if (pathname === '/api/v1') {
+    return '/'
+  }
+  return pathname
+}
+
 /** Check if path matches reserved platform prefixes */
 function isReservedPrefix(pathname: string): boolean {
   // Note: /id/ is NOT reserved — handled by SlugResolver for short ID routing
@@ -428,8 +440,10 @@ export default {
       
       // Create a modified URL with the stripped path for downstream handlers
       const strippedPath = stripRoutePrefix(url, isIdRoute)
+      const normalizedPath = normalizeApiPath(strippedPath)  // ADD THIS
+      
       const modifiedUrl = new URL(request.url)
-      modifiedUrl.pathname = strippedPath
+      modifiedUrl.pathname = normalizedPath
       
       // Create a new request with the modified URL
       const modifiedRequest = new Request(modifiedUrl, {
@@ -440,14 +454,14 @@ export default {
       
       const clients = buildClients(env, instanceId)
 
-      // Route to appropriate handler based on stripped path
+      // Route to appropriate handler based on normalized path
       return await routeRequest(
         modifiedRequest, 
         env, 
         clients, 
         instanceId, 
         ctx, 
-        strippedPath,
+        normalizedPath,
         { ownerId: routing.ownerId, ownerSlug: routing.ownerSlug, agentId: routing.agentId }
       )
     }
@@ -487,7 +501,7 @@ export default {
     }
     
     const clients = buildClients(env, instanceId)
-    return await routeRequest(request, env, clients, instanceId, ctx, url.pathname, {})
+    return await routeRequest(request, env, clients, instanceId, ctx, normalizeApiPath(url.pathname), {})
   },
 
   // ─── Baton Queue Consumer ───
