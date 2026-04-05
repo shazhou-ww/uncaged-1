@@ -186,11 +186,6 @@ export function getLoginPageHTML(): string {
       hideError();
     }
 
-    function storeTokens(tokens) {
-      localStorage.setItem('uncaged_access_token', tokens.accessToken);
-      localStorage.setItem('uncaged_refresh_token', tokens.refreshToken);
-    }
-
     // ─── Passkey Login ───
     async function loginWithPasskey() {
       hideError();
@@ -244,8 +239,7 @@ export function getLoginPageHTML(): string {
         }
         const result = await verifyRes.json();
 
-        // 5. Store tokens and redirect
-        storeTokens(result.tokens);
+        // 5. Cookies are set by server — just redirect
         window.location.href = '/';
       } catch (e) {
         if (e.name === 'NotAllowedError') {
@@ -326,8 +320,7 @@ export function getLoginPageHTML(): string {
         }
         const result = await verifyRes.json();
 
-        // 6. Store tokens and redirect
-        storeTokens(result.tokens);
+        // 6. Cookies are set by server — just redirect
         window.location.href = '/';
       } catch (e) {
         if (e.name === 'NotAllowedError') {
@@ -395,15 +388,11 @@ export function getLoginPageHTML(): string {
 
     // ─── Auto-redirect if already logged in ───
     (function() {
-      const token = localStorage.getItem('uncaged_access_token');
-      if (token) {
-        // Quick check — if token exists, try session
-        fetch('/auth/session', {
-          headers: { 'Authorization': 'Bearer ' + token },
-        }).then(r => {
+      // Check session via cookie-based auth
+      fetch('/auth/session', { credentials: 'same-origin' })
+        .then(r => {
           if (r.ok) window.location.href = '/';
         }).catch(() => {});
-      }
     })();
 
     // Enter key on displayName input triggers register

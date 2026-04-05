@@ -1,11 +1,11 @@
 /**
  * Chat page — JWT-authenticated chat UI for a specific agent
  *
- * Auth flow:
- *  1. Check localStorage for uncaged_access_token
- *  2. Verify via /auth/session → get user info
- *  3. If expired → POST /auth/refresh with refresh token
- *  4. If refresh fails → redirect to /auth/login
+ * Auth flow (cookie-based):
+ *  1. Call /auth/session (browser sends HttpOnly cookies automatically)
+ *  2. If 200 → user is authenticated, show chat
+ *  3. If 401 → redirect to /auth/login
+ *  4. authedFetch() auto-retries via /auth/refresh on 401
  *
  * Messages are sent to /:owner/:agent/api/chat
  */
@@ -225,8 +225,6 @@ export function getChatPageHTML(
   <script>
     const BASE = ${JSON.stringify(basePath)};
     const AGENT_NAME = ${JSON.stringify(displayName)};
-    let accessToken = null;
-    let refreshTokenStr = null;
     let isLoading = false;
     const messagesEl = document.getElementById('messages');
     const msgInput = document.getElementById('msgInput');
@@ -235,44 +233,25 @@ export function getChatPageHTML(
 
     // ─── Auth ───
     async function initAuth() {
-      accessToken = localStorage.getItem('uncaged_access_token');
-      refreshTokenStr = localStorage.getItem('uncaged_refresh_token');
-      if (!accessToken) return redirectLogin();
-      const ok = await checkSession();
+      const ok = await checkAuth();
       if (!ok) return redirectLogin();
       authOverlay.classList.add('hidden');
       loadHistory();
     }
 
-    async function checkSession() {
+    async function checkAuth() {
       try {
-        const r = await fetch('/auth/session', {
-          headers: { 'Authorization': 'Bearer ' + accessToken },
-        });
+        const r = await fetch('/auth/session', { credentials: 'same-origin' });
         if (r.ok) {
           const data = await r.json();
           setUserInfo(data.user);
           return true;
         }
-        if (r.status === 401) return await tryRefresh();
+        if (r.status === 401) return false;
         return false;
-      } catch { return false; }
-    }
-
-    async function tryRefresh() {
-      if (!refreshTokenStr) return false;
-      try {
-        const r = await fetch('/auth/refresh', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken: refreshTokenStr }),
-        });
-        if (!r.ok) return false;
-        const data = await r.json();
-        accessToken = data.accessToken;
-        localStorage.setItem('uncaged_access_token', accessToken);
-        return await checkSession();
-      } catch { return false; }
+      } catch { 
+        return false; 
+      }
     }
 
     function setUserInfo(user) {
@@ -284,8 +263,6 @@ export function getChatPageHTML(
     }
 
     function redirectLogin() {
-      localStorage.removeItem('uncaged_access_token');
-      localStorage.removeItem('uncaged_refresh_token');
       window.location.href = '/auth/login';
     }
 
@@ -293,25 +270,29 @@ export function getChatPageHTML(
       try {
         await fetch('/auth/logout', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken: refreshTokenStr }),
+          credentials: 'same-origin'
         });
       } catch {}
-      localStorage.removeItem('uncaged_access_token');
-      localStorage.removeItem('uncaged_refresh_token');
       window.location.href = '/auth/login';
     }
 
     // ─── Authed fetch ───
     async function authedFetch(url, opts = {}) {
-      opts.headers = opts.headers || {};
-      opts.headers['Authorization'] = 'Bearer ' + accessToken;
+      opts.credentials = 'same-origin';
       let r = await fetch(url, opts);
       if (r.status === 401) {
-        const refreshed = await tryRefresh();
-        if (!refreshed) { redirectLogin(); throw new Error('auth'); }
-        opts.headers['Authorization'] = 'Bearer ' + accessToken;
-        r = await fetch(url, opts);
+        // Try refresh
+        const refreshResult = await fetch('/auth/refresh', { 
+          method: 'POST', 
+          credentials: 'same-origin' 
+        });
+        if (refreshResult.ok) {
+          // Retry original request
+          return fetch(url, opts);
+        }
+        // Refresh failed — redirect to login
+        window.location.href = '/auth/login';
+        return r;
       }
       return r;
     }

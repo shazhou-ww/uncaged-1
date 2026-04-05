@@ -334,14 +334,22 @@ async function handlePasskeyRegisterVerify(
     // Delete challenge from KV
     await kv.delete(challengeKey)
 
-    // 9. Issue JWT tokens
-    const tokens = await issueTokens(userId, challengeData.displayName, env)
+    // 9. Issue JWT tokens and set HttpOnly cookies
+    const { Auth } = await import('@uncaged/core/auth')
+    const auth = new Auth(getJwtSecret(env), env.CHAT_KV)
+    const tokens = await auth.issueTokens(userId, challengeData.displayName)
+    const cookies = auth.buildCookies(tokens)
 
-    return jsonOk({
+    const headers = new Headers()
+    headers.append('Content-Type', 'application/json')
+    headers.append('Set-Cookie', cookies.accessToken)
+    headers.append('Set-Cookie', cookies.refreshToken)
+
+    return new Response(JSON.stringify({
       verified: true,
       userId,
       tokens,
-    })
+    }), { status: 200, headers })
   }
 
   // Linking to existing user — store credential directly
@@ -369,14 +377,22 @@ async function handlePasskeyRegisterVerify(
   // Delete challenge from KV
   await kv.delete(challengeKey)
 
-  // Issue JWT tokens
-  const tokens = await issueTokens(userId, challengeData.displayName, env)
+  // Issue JWT tokens and set HttpOnly cookies
+  const { Auth } = await import('@uncaged/core/auth')
+  const auth = new Auth(getJwtSecret(env), env.CHAT_KV)
+  const tokens = await auth.issueTokens(userId, challengeData.displayName)
+  const cookies = auth.buildCookies(tokens)
 
-  return jsonOk({
+  const headers = new Headers()
+  headers.append('Content-Type', 'application/json')
+  headers.append('Set-Cookie', cookies.accessToken)
+  headers.append('Set-Cookie', cookies.refreshToken)
+
+  return new Response(JSON.stringify({
     verified: true,
     userId,
     tokens,
-  })
+  }), { status: 200, headers })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -542,15 +558,23 @@ async function handlePasskeyLoginVerify(
   // 8. Delete challenge from KV
   await kv.delete(challengeKey)
 
-  // 9. Issue JWT tokens
-  const tokens = await issueTokens(credRow.user_id, credRow.display_name, env)
+  // 9. Issue JWT tokens and set HttpOnly cookies
+  const { Auth } = await import('@uncaged/core/auth')
+  const auth = new Auth(getJwtSecret(env), env.CHAT_KV)
+  const tokens = await auth.issueTokens(credRow.user_id, credRow.display_name)
+  const cookies = auth.buildCookies(tokens)
 
-  return jsonOk({
+  const headers = new Headers()
+  headers.append('Content-Type', 'application/json')
+  headers.append('Set-Cookie', cookies.accessToken)
+  headers.append('Set-Cookie', cookies.refreshToken)
+
+  return new Response(JSON.stringify({
     verified: true,
     userId: credRow.user_id,
     displayName: credRow.display_name,
     tokens,
-  })
+  }), { status: 200, headers })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -669,22 +693,22 @@ async function handleGoogleCallback(
       .run()
   }
 
-  // Issue tokens
-  const tokens = await issueTokens(
+  // Issue tokens and set cookies
+  const { Auth } = await import('@uncaged/core/auth')
+  const auth = new Auth(getJwtSecret(env), env.CHAT_KV)
+  const tokens = await auth.issueTokens(
     resolved.userId,
     userInfo.name || userInfo.email,
-    env,
   )
+  const cookies = auth.buildCookies(tokens)
 
-  // Return HTML that stores tokens and redirects
+  // Redirect to home with cookies set
   const html = `<!DOCTYPE html>
 <html>
 <head><title>Logging in...</title></head>
 <body>
 <script>
-  const tokens = ${JSON.stringify(tokens)};
-  localStorage.setItem('uncaged_access_token', tokens.accessToken);
-  localStorage.setItem('uncaged_refresh_token', tokens.refreshToken);
+  // No localStorage needed — cookies are already set
   window.location.href = '/';
 </script>
 <noscript>
@@ -693,10 +717,12 @@ async function handleGoogleCallback(
 </body>
 </html>`
 
-  return new Response(html, {
-    status: 200,
-    headers: { 'Content-Type': 'text/html' },
-  })
+  const headers = new Headers()
+  headers.append('Content-Type', 'text/html')
+  headers.append('Set-Cookie', cookies.accessToken)
+  headers.append('Set-Cookie', cookies.refreshToken)
+
+  return new Response(html, { status: 200, headers })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -745,26 +771,37 @@ async function handleSession(request: Request, env: WorkerEnv): Promise<Response
 }
 
 async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response> {
-  const body = await safeJsonBody<{ refreshToken: string }>(request)
-  if (!body?.refreshToken) {
+  const body = await safeJsonBody<{ refreshToken?: string }>(request)
+  let refreshToken = body?.refreshToken
+
+  // If no refresh token in body, try to get it from cookies
+  if (!refreshToken) {
+    const cookie = request.headers.get('Cookie') || ''
+    const refreshTokenMatch = cookie.match(/refresh_token=([^;]+)/)
+    if (refreshTokenMatch) {
+      refreshToken = refreshTokenMatch[1]
+    }
+  }
+
+  if (!refreshToken) {
     return jsonError('Missing refreshToken', 400)
   }
 
   const kv = env.CHAT_KV
 
   // Verify the refresh token
-  const payload = await verifyJwt(body.refreshToken, env)
+  const payload = await verifyJwt(refreshToken, env)
   if (!payload || payload.type !== 'refresh') {
     return jsonError('Invalid or expired refresh token', 401)
   }
 
   // Check if token has been revoked
-  const revoked = await kv.get(`revoked:${body.refreshToken}`)
+  const revoked = await kv.get(`revoked:${refreshToken}`)
   if (revoked) {
     return jsonError('Token has been revoked', 401)
   }
 
-  // Issue new access token (keep the same refresh token)
+  // Issue new access token and update the access_token cookie
   const accessToken = await signJwt(
     {
       sub: payload.sub,
@@ -776,31 +813,55 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
     env,
   )
 
-  return jsonOk({
+  const headers = new Headers()
+  headers.append('Content-Type', 'application/json')
+  headers.append('Set-Cookie', `access_token=${accessToken}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${ACCESS_TOKEN_TTL}`)
+
+  return new Response(JSON.stringify({
     accessToken,
     expiresIn: ACCESS_TOKEN_TTL,
-  })
+  }), { status: 200, headers })
 }
 
 async function handleLogout(request: Request, env: WorkerEnv): Promise<Response> {
   const body = await safeJsonBody<{ refreshToken?: string }>(request)
   const kv = env.CHAT_KV
 
-  // Revoke refresh token if provided
-  if (body?.refreshToken) {
-    const payload = await verifyJwt(body.refreshToken, env)
+  // Try to get refresh token from body first, then from cookies
+  let refreshTokenToRevoke = body?.refreshToken
+
+  if (!refreshTokenToRevoke) {
+    const cookie = request.headers.get('Cookie') || ''
+    const refreshTokenMatch = cookie.match(/refresh_token=([^;]+)/)
+    if (refreshTokenMatch) {
+      refreshTokenToRevoke = refreshTokenMatch[1]
+    }
+  }
+
+  // Revoke refresh token if found
+  if (refreshTokenToRevoke) {
+    const payload = await verifyJwt(refreshTokenToRevoke, env)
     if (payload && payload.type === 'refresh') {
       // Store in KV as revoked until it would have expired
       const ttl = payload.exp - Math.floor(Date.now() / 1000)
       if (ttl > 0) {
-        await kv.put(`revoked:${body.refreshToken}`, '1', {
+        await kv.put(`revoked:${refreshTokenToRevoke}`, '1', {
           expirationTtl: ttl,
         })
       }
     }
   }
 
-  return jsonOk({ loggedOut: true })
+  // Clear cookies by setting them with Max-Age=0
+  const headers = new Headers()
+  headers.append('Content-Type', 'application/json')
+  headers.append('Set-Cookie', 'access_token=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0')
+  headers.append('Set-Cookie', 'refresh_token=; HttpOnly; Secure; SameSite=Lax; Path=/auth/refresh; Max-Age=0')
+
+  return new Response(JSON.stringify({ loggedOut: true }), {
+    status: 200,
+    headers,
+  })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -927,7 +988,7 @@ async function handleMagicLinkVerify(request: Request, env: WorkerEnv): Promise<
 
   // Import and use the Auth class from core
   const { Auth } = await import('@uncaged/core/auth')
-  const auth = new Auth(secret, kv)
+  const auth = new Auth(secret, env.CHAT_KV)
   const tokens = await auth.issueTokens(user.id, user.display_name)
   const cookies = auth.buildCookies(tokens)
 
@@ -1044,14 +1105,30 @@ async function extractUserIdFromToken(
   request: Request,
   env: WorkerEnv,
 ): Promise<string | null> {
+  // 1. Check Authorization header first (for API clients)
   const authHeader = request.headers.get('Authorization')
-  if (!authHeader?.startsWith('Bearer ')) return null
+  if (authHeader?.startsWith('Bearer ')) {
+    const token = authHeader.slice(7)
+    const payload = await verifyJwt(token, env)
+    // Accept tokens with type='access' or no type field (core auth compat)
+    if (payload && (!payload.type || payload.type === 'access')) {
+      return payload.sub
+    }
+  }
 
-  const token = authHeader.slice(7)
-  const payload = await verifyJwt(token, env)
-  if (!payload || payload.type !== 'access') return null
+  // 2. Check cookies (for web clients)
+  const cookie = request.headers.get('Cookie') || ''
+  const accessTokenMatch = cookie.match(/access_token=([^;]+)/)
+  if (accessTokenMatch) {
+    const token = accessTokenMatch[1]
+    const payload = await verifyJwt(token, env)
+    // Accept tokens with type='access' or no type field (core auth compat)
+    if (payload && (!payload.type || payload.type === 'access')) {
+      return payload.sub
+    }
+  }
 
-  return payload.sub
+  return null
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
