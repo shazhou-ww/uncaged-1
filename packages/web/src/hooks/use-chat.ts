@@ -63,6 +63,7 @@ export function useChat(basePath: string): ChatState {
   }, [])
 
   const clearChat = useCallback(async () => {
+    if (!window.confirm('确定要清空聊天记录吗？')) return
     try {
       await apiClearHistory(basePathRef.current)
       setMessages([])

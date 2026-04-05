@@ -1,4 +1,5 @@
 import { type ReactNode } from 'react'
+import { Navigate } from 'react-router-dom'
 import { useAuth } from '../../hooks/use-auth'
 import { Spinner } from '../ui/spinner'
 
@@ -18,12 +19,7 @@ export function AuthGuard({ children }: AuthGuardProps) {
   }
 
   if (!user) {
-    window.location.href = '/auth/login'
-    return (
-      <div className="fixed inset-0 bg-bg flex items-center justify-center z-50">
-        <Spinner size="lg" />
-      </div>
-    )
+    return <Navigate to="/auth/login" replace />
   }
 
   return <>{children({ user, logout })}</>

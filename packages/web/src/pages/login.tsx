@@ -3,6 +3,7 @@ import { Card, CardHeader, CardContent } from '../components/ui/card'
 import { PasskeyLogin } from '../components/auth/passkey-login'
 import { PasskeyRegister } from '../components/auth/passkey-register'
 import { GoogleLogin } from '../components/auth/google-login'
+import { MagicLink } from '../components/auth/magic-link'
 
 export function LoginPage() {
   const [view, setView] = useState<'login' | 'register'>('login')
@@ -14,14 +15,30 @@ export function LoginPage() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (!data?.user) return
-        if (data.agents?.length > 0) {
-          window.location.href = `/${data.user.slug}/${data.agents[0].slug}/`
-        }
+        redirectToAgent(data)
       })
       .catch(() => {})
   }, [])
 
-  function handleSuccess() {
+  function redirectToAgent(data: { user: { slug?: string }; agents?: Array<{ slug: string }> }) {
+    if (data.agents?.length && data.user.slug) {
+      window.location.href = `/${data.user.slug}/${data.agents[0].slug}/`
+    } else {
+      window.location.href = '/'
+    }
+  }
+
+  async function handleSuccess() {
+    // Fetch session to get user info + agent list, then redirect
+    try {
+      const r = await fetch('/auth/session', { credentials: 'same-origin' })
+      if (r.ok) {
+        const data = await r.json()
+        redirectToAgent(data)
+        return
+      }
+    } catch {}
+    // Fallback
     window.location.href = '/'
   }
 
@@ -58,16 +75,24 @@ export function LoginPage() {
                 <div className="flex-1 border-t border-border" />
               </div>
 
-              <div className="text-center text-text-3 text-sm">
-                没有账号？
+              {/* Magic Link 邮箱登录 */}
+              <MagicLink onError={handleError} />
+
+              <div className="flex items-center gap-4 text-text-4 text-sm mt-2">
+                <div className="flex-1 border-t border-border" />
+                <span>没有账号？</span>
+                <div className="flex-1 border-t border-border" />
+              </div>
+
+              <div className="text-center">
                 <button
                   onClick={() => {
                     setView('register')
                     setError(null)
                   }}
-                  className="text-accent font-medium cursor-pointer hover:underline ml-1 bg-transparent border-none"
+                  className="text-accent font-medium cursor-pointer hover:underline bg-transparent border-none text-sm"
                 >
-                  注册
+                  创建账号
                 </button>
               </div>
             </>
