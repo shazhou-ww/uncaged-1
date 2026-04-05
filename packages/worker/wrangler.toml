@@ -47,6 +47,15 @@ queue = "baton-events"
 max_batch_size = 5
 max_retries = 3
 
+# Runner Hub Durable Object
+[[durable_objects.bindings]]
+name = "RUNNER_HUB"
+class_name = "RunnerHub"
+
+[[migrations]]
+tag = "v6"
+new_classes = ["RunnerHub"]
+
 # Route: doudou instance (Telegram bot)
 [[routes]]
 pattern = "doudou.shazhou.work/*"

@@ -1,0 +1,21 @@
+{
+  "name": "@uncaged/runner",
+  "version": "0.1.0",
+  "description": "Uncaged Runner — headless agent device client",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "uncaged-runner": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "ws": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.0.0",
+    "typescript": "^5.0.0"
+  }
+}
