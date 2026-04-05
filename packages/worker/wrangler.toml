@@ -2,6 +2,11 @@ name = "uncaged"
 main = "dist/index.js"
 compatibility_date = "2026-04-03"
 
+# React SPA static assets (built from packages/web)
+[assets]
+directory = "../web/dist"
+binding = "ASSETS"
+
 [vars]
 # SIGIL_URL is no longer required when SIGIL_KV + LOADER are bound (Phase 3b local execution).
 # Kept as fallback only. Can be removed once remote Sigil Worker is decommissioned.

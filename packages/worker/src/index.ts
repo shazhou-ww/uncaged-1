@@ -24,9 +24,6 @@ import {
   handleCapabilityInspect 
 } from './sigil-routes.js'
 import { handleAuthRoutes } from './auth.js'
-import { getLoginPageHTML } from './pages/login.js'
-import { getLandingPageHTML } from './pages/landing.js'
-import { getChatPageHTML } from './pages/chat.js'
 import { getManifestJSON } from './pages/manifest.js'
 
 // Re-export RunnerHub so wrangler can find the Durable Object class
@@ -46,6 +43,8 @@ export interface WorkerEnv extends Env {
   // Sigil execution engine bindings (Phase 3b)
   SIGIL_KV?: KVNamespace
   LOADER?: any  // worker_loaders binding
+  // Static assets binding (React SPA)
+  ASSETS: Fetcher
 }
 
 // Session interface (used by web channel)
@@ -432,15 +431,7 @@ async function routeRequest(
     return handleTelegramRoutes(request, env, clients, instanceId, ctx)
   }
 
-  // ─── New PWA pages (JWT auth) ───
-  if (pathname === '/' && request.method === 'GET') {
-    const agentDisplayName = routingInfo?.agentId || instanceId
-    const ownerSlug = routingInfo?.ownerSlug || ''
-    return new Response(
-      getChatPageHTML(instanceId, ownerSlug, agentDisplayName),
-      { headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' } },
-    )
-  }
+  // ─── Dynamic manifest.json (per-agent) ───
   if (pathname === '/manifest.json' && request.method === 'GET') {
     const agentDisplayName = routingInfo?.agentId || instanceId
     const ownerSlug = routingInfo?.ownerSlug || ''
@@ -544,6 +535,11 @@ async function routeRequest(
   const commonResponse = await handleCommonRoutes(request, env, clients, instanceId, { webEnabled: !!webEnabled })
   if (commonResponse) return commonResponse
 
+  // ─── SPA fallback for GET requests (react-router handles client-side routing) ───
+  if (request.method === 'GET') {
+    return env.ASSETS.fetch(new Request(new URL('/', request.url), request))
+  }
+
   return new Response('Not found', { status: 404 })
 }
 
@@ -557,20 +553,21 @@ export default {
     
     // Handle path-based routing for uncaged.shazhou.work
     if (url.hostname === 'uncaged.shazhou.work') {
-      // ─── Platform root: landing page ───
+      // ─── Static assets: serve directly from ASSETS binding ───
+      if (url.pathname.startsWith('/assets/') || url.pathname === '/favicon.ico') {
+        return env.ASSETS.fetch(request)
+      }
+
+      // ─── Platform root: serve SPA ───
       if (url.pathname === '/' && request.method === 'GET') {
-        return new Response(getLandingPageHTML(), {
-          headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' },
-        })
+        return env.ASSETS.fetch(request)
       }
 
       // Check reserved prefixes first - these bypass agent routing
       if (isReservedPrefix(url.pathname)) {
-        // Serve login page at GET /auth/login
+        // Serve SPA for GET /auth/login (React handles this route client-side)
         if (url.pathname === '/auth/login' && request.method === 'GET') {
-          return new Response(getLoginPageHTML(), {
-            headers: { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' },
-          })
+          return env.ASSETS.fetch(new Request(new URL('/', request.url), request))
         }
         // Handle /auth/* API routes at platform level
         if (url.pathname.startsWith('/auth/')) {
