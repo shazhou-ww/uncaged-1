@@ -180,4 +180,47 @@ export class SlugResolver {
   async invalidateCacheById(ownerShortId: string, agentShortId: string): Promise<void> {
     await this.kv.delete(`id:${ownerShortId}/${agentShortId}`)
   }
+
+  /**
+   * Resolve owner by slug only: /:owner_slug → owner info
+   * Used for owner-level routes like /:owner/api/v1/capabilities
+   */
+  async resolveOwnerBySlug(ownerSlug: string): Promise<{ownerId: string, ownerSlug: string, ownerShortId: string} | null> {
+    const cacheKey = `owner:${ownerSlug}`
+    
+    // 1. Check KV cache first
+    const cached = await this.kv.get(cacheKey, 'json')
+    if (cached) {
+      return cached as {ownerId: string, ownerSlug: string, ownerShortId: string}
+    }
+
+    // 2. Query D1: SELECT user only
+    const result = await this.db
+      .prepare(`
+        SELECT id as owner_id, slug as owner_slug, short_id as owner_short_id
+        FROM users 
+        WHERE slug = ?
+      `)
+      .bind(ownerSlug)
+      .first<{
+        owner_id: string
+        owner_slug: string
+        owner_short_id: string
+      }>()
+
+    if (!result) {
+      return null
+    }
+
+    const resolved = {
+      ownerId: result.owner_id,
+      ownerSlug: result.owner_slug,
+      ownerShortId: result.owner_short_id
+    }
+
+    // 3. Cache result for 1 hour
+    await this.kv.put(cacheKey, JSON.stringify(resolved), { expirationTtl: 3600 })
+
+    return resolved
+  }
 }

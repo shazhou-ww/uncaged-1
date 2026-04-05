@@ -1,5 +1,6 @@
 // Unified Uncaged Worker — one codebase, N agent instances
 // Phase 2: Slug resolution and short ID routing with D1 database
+// Phase 3a: Capabilities data layer and CRUD API
 
 import type { Env } from '@uncaged/core/env'
 import { SigilClient } from '@uncaged/core/sigil'
@@ -14,6 +15,8 @@ import { handleCommonRoutes, type CoreClients } from './router.js'
 import { handleTelegramRoutes, sendTelegram } from './channels/telegram.js'
 import { handleWebRoutes } from './channels/web.js'
 import { SlugResolver } from './slug-resolver.js'
+import { handleCapabilitiesRoutes } from './capabilities.js'
+import { handleAgentCapabilitiesRoutes } from './agent-capabilities.js'
 
 // Unified environment — all channel secrets are optional
 export interface WorkerEnv extends Env {
@@ -47,7 +50,7 @@ function isWebInstance(env: WorkerEnv, instanceId: string): boolean {
 async function resolveRouting(
   env: WorkerEnv,
   pathname: string
-): Promise<{ instanceId: string; redirect?: string } | null> {
+): Promise<{ instanceId?: string; redirect?: string; ownerOnly?: boolean; ownerId?: string; ownerSlug?: string; agentId?: string } | null> {
   if (!env.MEMORY_DB || !env.CHAT_KV) {
     console.error('[Routing] MEMORY_DB or CHAT_KV not configured')
     return null
@@ -64,7 +67,43 @@ async function resolveRouting(
     if (!resolved) return null
 
     // For backward compatibility, use agent slug as instanceId
-    return { instanceId: resolved.agentSlug }
+    return { 
+      instanceId: resolved.agentSlug,
+      ownerId: resolved.ownerId,
+      ownerSlug: resolved.ownerSlug,
+      agentId: resolved.agentId
+    }
+  }
+
+  // Check for owner-level routes: /:owner/api/v1/capabilities/...
+  const ownerRoute = parseOwnerLevelRoute(pathname)
+  if (ownerRoute) {
+    // Check for redirects first
+    const ownerRedirect = await slugResolver.checkRedirect('user', ownerRoute.ownerSlug)
+    if (ownerRedirect) {
+      return { 
+        redirect: `/${ownerRedirect}/api/v1/capabilities${ownerRoute.remainingPath}`
+      }
+    }
+
+    // Resolve owner only
+    const resolved = await slugResolver.resolveOwnerBySlug(ownerRoute.ownerSlug)
+    if (!resolved) return null
+
+    return {
+      ownerOnly: true,
+      ownerId: resolved.ownerId,
+      ownerSlug: resolved.ownerSlug
+    }
+  }
+
+  // Handle platform capabilities route: /platform/capabilities
+  if (pathname.startsWith('/platform/capabilities')) {
+    return {
+      ownerOnly: true,
+      ownerId: '__platform__',
+      ownerSlug: 'platform'
+    }
   }
 
   // Handle slug routing
@@ -75,7 +114,6 @@ async function resolveRouting(
   const ownerRedirect = await slugResolver.checkRedirect('user', slugRoute.ownerSlug)
   if (ownerRedirect) {
     return { 
-      instanceId: '', 
       redirect: `/${ownerRedirect}/${slugRoute.agentSlug}` 
     }
   }
@@ -83,7 +121,6 @@ async function resolveRouting(
   const agentRedirect = await slugResolver.checkRedirect('agent', slugRoute.agentSlug)
   if (agentRedirect) {
     return { 
-      instanceId: '', 
       redirect: `/${slugRoute.ownerSlug}/${agentRedirect}` 
     }
   }
@@ -93,7 +130,12 @@ async function resolveRouting(
   if (!resolved) return null
 
   // For backward compatibility, use agent slug as instanceId
-  return { instanceId: resolved.agentSlug }
+  return { 
+    instanceId: resolved.agentSlug,
+    ownerId: resolved.ownerId,
+    ownerSlug: resolved.ownerSlug,
+    agentId: resolved.agentId
+  }
 }
 
 /** Remove routing prefix from pathname */
@@ -121,8 +163,9 @@ function stripRoutePrefix(url: URL, isIdRoute: boolean): string {
 
 /** Check if path matches reserved platform prefixes */
 function isReservedPrefix(pathname: string): boolean {
-  // Note: /id/ is NOT reserved — it's handled by SlugResolver for short ID routing
-  const reservedPrefixes = ['/auth/', '/admin/', '/platform/', '/.well-known/']
+  // Note: /id/ is NOT reserved — handled by SlugResolver for short ID routing
+  // Note: /platform/ is NOT reserved — handled by resolveRouting for platform capabilities
+  const reservedPrefixes = ['/auth/', '/admin/', '/.well-known/']
   return reservedPrefixes.some(prefix => pathname.startsWith(prefix))
 }
 
@@ -146,6 +189,24 @@ function parseSlugRoute(pathname: string): { ownerSlug: string; agentSlug: strin
     ownerSlug: pathSegments[0],
     agentSlug: pathSegments[1]
   }
+}
+
+/** Parse owner-level route: /:owner/api/v1/capabilities/... */
+function parseOwnerLevelRoute(pathname: string): { ownerSlug: string; remainingPath: string } | null {
+  // Match /:owner_slug/api/v1/capabilities/...
+  const pathSegments = pathname.split('/').filter(Boolean)
+  if (pathSegments.length < 4) return null
+  
+  if (pathSegments[1] === 'api' && pathSegments[2] === 'v1' && pathSegments[3] === 'capabilities') {
+    const remainingSegments = pathSegments.slice(4)
+    const remainingPath = remainingSegments.length > 0 ? `/${remainingSegments.join('/')}` : ''
+    return {
+      ownerSlug: pathSegments[0],
+      remainingPath
+    }
+  }
+  
+  return null
 }
 
 /** Handle legacy domain redirects */
@@ -172,7 +233,7 @@ function handleLegacyRedirect(request: Request): Response | null {
 
 /** Build the 5 core clients that every route needs */
 function buildClients(env: WorkerEnv, instanceId: string) {
-  const sigil = new SigilClient(env.SIGIL_URL, env.SIGIL_DEPLOY_TOKEN)
+  const sigil = new SigilClient(env.SIGIL_URL, env.SIGIL_DEPLOY_TOKEN, env.MEMORY_DB)
   const llm = new LlmClient(
     env.DASHSCOPE_API_KEY,
     env.LLM_MODEL || undefined,
@@ -191,10 +252,37 @@ async function routeRequest(
   request: Request,
   env: WorkerEnv,
   clients: CoreClients,
-  instanceId: string,
+  instanceId: string | undefined,
   ctx: ExecutionContext,
   pathname: string,
+  routingInfo?: { ownerId?: string; ownerSlug?: string; agentId?: string },
 ): Promise<Response> {
+  // ─── Capabilities routes (owner-level and platform) ───
+  if (routingInfo?.ownerSlug && routingInfo?.ownerId) {
+    const capResponse = await handleCapabilitiesRoutes(
+      request, 
+      env, 
+      routingInfo.ownerSlug, 
+      routingInfo.ownerId
+    )
+    if (capResponse) return capResponse
+  }
+
+  // ─── Agent capabilities routes ───
+  if (routingInfo?.agentId) {
+    const agentCapResponse = await handleAgentCapabilitiesRoutes(
+      request,
+      env,
+      routingInfo.agentId
+    )
+    if (agentCapResponse) return agentCapResponse
+  }
+
+  // For agent-specific routes, instanceId is required
+  if (!instanceId) {
+    return new Response('Invalid routing context', { status: 400 })
+  }
+
   // ─── Telegram channel ───
   if (pathname === '/webhook' && request.method === 'POST') {
     if (!env.TELEGRAM_BOT_TOKEN) {
@@ -260,8 +348,23 @@ export default {
         const redirectUrl = `${url.protocol}//${url.host}${routing.redirect}${url.search}`
         return Response.redirect(redirectUrl, 301)
       }
+
+      // For owner-only routes, don't strip path or build agent clients
+      if (routing.ownerOnly) {
+        // Owner-level or platform routes - no instance clients needed
+        const dummyClients = buildClients(env, 'dummy') // Minimal clients for API auth
+        return await routeRequest(
+          request, 
+          env, 
+          dummyClients, 
+          undefined, // no instanceId 
+          ctx, 
+          url.pathname,
+          { ownerId: routing.ownerId, ownerSlug: routing.ownerSlug }
+        )
+      }
       
-      const instanceId = routing.instanceId
+      const instanceId = routing.instanceId!
       const isIdRoute = url.pathname.startsWith('/id/')
       
       // Create a modified URL with the stripped path for downstream handlers
@@ -279,7 +382,15 @@ export default {
       const clients = buildClients(env, instanceId)
 
       // Route to appropriate handler based on stripped path
-      return await routeRequest(modifiedRequest, env, clients, instanceId, ctx, strippedPath)
+      return await routeRequest(
+        modifiedRequest, 
+        env, 
+        clients, 
+        instanceId, 
+        ctx, 
+        strippedPath,
+        { ownerId: routing.ownerId, ownerSlug: routing.ownerSlug, agentId: routing.agentId }
+      )
     }
     
     // Legacy hostname-based routing for backward compatibility
@@ -292,7 +403,7 @@ export default {
     }
     
     const clients = buildClients(env, instanceId)
-    return await routeRequest(request, env, clients, instanceId, ctx, url.pathname)
+    return await routeRequest(request, env, clients, instanceId, ctx, url.pathname, {})
   },
 
   // ─── Baton Queue Consumer ───
