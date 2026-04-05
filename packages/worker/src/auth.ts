@@ -702,27 +702,17 @@ async function handleGoogleCallback(
   )
   const cookies = auth.buildCookies(tokens)
 
-  // Redirect to home with cookies set
-  const html = `<!DOCTYPE html>
-<html>
-<head><title>Logging in...</title></head>
-<body>
-<script>
-  // No localStorage needed — cookies are already set
-  window.location.href = '/';
-</script>
-<noscript>
-  <p>Login successful. <a href="/">Click here to continue</a>.</p>
-</noscript>
-</body>
-</html>`
+  // Redirect to user's agent page
+  const user = await db.prepare("SELECT slug FROM users WHERE id = ?").bind(resolved.userId).first<{ slug: string }>()
+  const agent = await db.prepare("SELECT slug FROM agents WHERE owner_id = ? LIMIT 1").bind(resolved.userId).first<{ slug: string }>()
+  const redirectTo = (user?.slug && agent?.slug) ? `/${user.slug}/${agent.slug}/` : '/'
 
   const headers = new Headers()
-  headers.append('Content-Type', 'text/html')
+  headers.append('Location', redirectTo)
   headers.append('Set-Cookie', cookies.accessToken)
   headers.append('Set-Cookie', cookies.refreshToken)
 
-  return new Response(html, { status: 200, headers })
+  return new Response(null, { status: 302, headers })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
