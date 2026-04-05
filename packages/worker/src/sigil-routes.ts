@@ -203,13 +203,12 @@ export async function handleCapabilityQuery(
       return new Response('Sigil execution engine not configured', { status: 503 })
     }
 
-    const query = url.searchParams.get('q') || ''
-    const limit = parseInt(url.searchParams.get('limit') || '10')
+    const query = url.searchParams.get('q') || undefined
+    const limit = parseInt(url.searchParams.get('limit') || '20')
 
     const queryParams: QueryParams = {
       q: query,
       limit: Math.min(limit, 50), // Cap at 50
-      mode: 'find'
     }
 
     const result: QueryResult = await workerPool.query(queryParams)
