@@ -61,7 +61,7 @@ async function executeBaton(
   await batonStore.markRunning(batonId)
 
   // Build the worker agent — same capabilities as the main agent
-  const sigil = new SigilClient(env.SIGIL_URL, env.SIGIL_DEPLOY_TOKEN)
+  const sigil = new SigilClient(env.SIGIL_URL || '', env.SIGIL_DEPLOY_TOKEN || '')
   const soul = new Soul(env.CHAT_KV, env.INSTANCE_ID || 'default')
   const memory = new Memory(env.MEMORY_INDEX, env.AI, env.INSTANCE_ID || 'default', env.MEMORY_DB)
   const llm = new LlmClient(
@@ -141,7 +141,7 @@ async function handleChildDone(
   }).join('\n\n')
 
   // Run a continuation: the parent re-enters the agent loop with child results
-  const sigil = new SigilClient(env.SIGIL_URL, env.SIGIL_DEPLOY_TOKEN)
+  const sigil = new SigilClient(env.SIGIL_URL || '', env.SIGIL_DEPLOY_TOKEN || '')
   const soul = new Soul(env.CHAT_KV, env.INSTANCE_ID || 'default')
   const memory = new Memory(env.MEMORY_INDEX, env.AI, env.INSTANCE_ID || 'default', env.MEMORY_DB)
   const llm = new LlmClient(

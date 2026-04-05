@@ -3,6 +3,8 @@ main = "dist/index.js"
 compatibility_date = "2026-04-03"
 
 [vars]
+# SIGIL_URL is no longer required when SIGIL_KV + LOADER are bound (Phase 3b local execution).
+# Kept as fallback only. Can be removed once remote Sigil Worker is decommissioned.
 SIGIL_URL = "https://sigil.shazhou.work"
 
 # Unified KV namespace (shared by all instances, isolated by instanceId prefix)

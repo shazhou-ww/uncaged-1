@@ -5,7 +5,7 @@ export interface Env {
   LLM_MODEL: string
   LLM_BASE_URL: string
   SIGIL_DEPLOY_TOKEN: string
-  SIGIL_URL: string
+  SIGIL_URL?: string  // Optional: only needed for remote fallback
   INSTANCE_ID: string
   CHAT_KV: KVNamespace
   MEMORY_INDEX: VectorizeIndex

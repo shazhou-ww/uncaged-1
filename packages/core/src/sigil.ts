@@ -1,4 +1,7 @@
-// Sigil API client with D1 fallback support (Phase 3a)
+// Sigil API client with D1 fallback support (Phase 3a) and local WorkerPool execution (Phase 3b)
+
+import { WorkerPool, type WorkerLoader } from './sigil/worker-pool.js'
+import { EmbeddingService } from './sigil/embedding.js'
 
 export interface DeployParams {
   name: string
@@ -31,8 +34,10 @@ export interface D1CapabilityRow {
 }
 
 export class SigilClient {
+  private workerPool?: WorkerPool
+
   constructor(
-    private baseUrl: string,
+    private baseUrl: string,        // remote URL (can be empty string for local-only)
     private deployToken: string,
     private d1db?: D1Database,
   ) {}
@@ -44,7 +49,29 @@ export class SigilClient {
     this.d1db = db
   }
 
+  /** Configure local execution (Phase 3b) */
+  setLocalExecution(kv: KVNamespace, loader: WorkerLoader, ai: any): void {
+    const embeddingService = new EmbeddingService(ai, kv)
+    this.workerPool = new WorkerPool(kv, loader, embeddingService)
+  }
+
   async query(q: string, limit = 5, agentId?: string): Promise<QueryResult> {
+    // If local WorkerPool available, use it directly
+    if (this.workerPool) {
+      const result = await this.workerPool.query({ q, limit })
+      // Map WorkerPool's QueryResult to SigilClient's QueryResult format
+      return {
+        items: result.items.map(item => ({
+          capability: item.capability,
+          description: item.description,
+          tags: item.tags,
+          type: item.type,
+          schema: item.schema
+        })),
+        total: result.total
+      }
+    }
+
     try {
       // Primary: Remote Sigil Worker
       const url = new URL('/_api/query', this.baseUrl)
@@ -125,6 +152,10 @@ export class SigilClient {
   }
 
   async inspect(name: string, agentId?: string): Promise<any> {
+    if (this.workerPool) {
+      return this.workerPool.inspect(name)
+    }
+
     try {
       // Primary: Remote Sigil Worker
       const res = await fetch(`${this.baseUrl}/_api/inspect/${name}`, {
@@ -170,6 +201,18 @@ export class SigilClient {
   }
 
   async deploy(params: DeployParams): Promise<any> {
+    if (this.workerPool) {
+      return this.workerPool.deploy({
+        name: params.name,
+        code: params.code,
+        schema: params.schema,
+        execute: params.execute,
+        type: 'normal',
+        description: params.description,
+        tags: params.tags,
+      })
+    }
+
     const res = await fetch(`${this.baseUrl}/_api/deploy`, {
       method: 'POST',
       headers: {
@@ -194,6 +237,18 @@ export class SigilClient {
   }
 
   async run(name: string, params: Record<string, any> = {}): Promise<string> {
+    if (this.workerPool) {
+      // WorkerPool.invoke() takes a Request and returns a Response
+      // Need to convert params → Request and Response → string
+      const request = new Request('http://localhost/invoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      })
+      const response = await this.workerPool.invoke(name, request)
+      return response.text()
+    }
+
     const res = await fetch(`${this.baseUrl}/run/${name}`, {
       method: 'POST',
       headers: {

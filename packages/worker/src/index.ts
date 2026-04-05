@@ -242,7 +242,13 @@ function handleLegacyRedirect(request: Request): Response | null {
 
 /** Build the 5 core clients that every route needs */
 function buildClients(env: WorkerEnv, instanceId: string) {
-  const sigil = new SigilClient(env.SIGIL_URL, env.SIGIL_DEPLOY_TOKEN, env.MEMORY_DB)
+  const sigil = new SigilClient(env.SIGIL_URL || '', env.SIGIL_DEPLOY_TOKEN || '', env.MEMORY_DB)
+  
+  // Enable local Sigil execution if bindings available (Phase 3b)
+  if (env.SIGIL_KV && env.LOADER && env.AI) {
+    sigil.setLocalExecution(env.SIGIL_KV, env.LOADER, env.AI)
+  }
+  
   const llm = new LlmClient(
     env.DASHSCOPE_API_KEY,
     env.LLM_MODEL || undefined,
