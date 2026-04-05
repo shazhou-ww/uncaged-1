@@ -5,6 +5,8 @@
  * Handles both /:owner_slug/:agent_slug and /id/:owner_short_id/:agent_short_id routing.
  */
 
+import { RESERVED_SLUGS } from './constants.js'
+
 export interface ResolvedRoute {
   ownerId: string       // UUID
   ownerSlug: string
@@ -13,13 +15,6 @@ export interface ResolvedRoute {
   agentSlug: string
   agentShortId: string  // a_xxxxx
 }
-
-// Reserved slugs that cannot be used for users/agents
-const RESERVED_SLUGS = new Set([
-  'auth', 'admin', 'platform', 'id', 'api', 'hook', 
-  'static', 'health', 'well-known', 'webhook', 'login',
-  'register', 'settings', 'help', 'about', 'docs'
-])
 
 export class SlugResolver {
   constructor(private db: D1Database, private kv: KVNamespace) {}
