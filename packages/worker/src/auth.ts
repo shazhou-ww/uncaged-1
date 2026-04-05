@@ -25,11 +25,16 @@ import { IdentityResolver } from '@uncaged/core/identity'
 
 // ─── Constants ───
 
-const RP_ID = 'uncaged.shazhou.work'
+const DEFAULT_RP_ID = 'uncaged.shazhou.work'
 const RP_NAME = 'Uncaged'
 const CHALLENGE_TTL = 60 // seconds
 const ACCESS_TOKEN_TTL = 60 * 60 // 1 hour
 const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60 // 30 days
+
+/** Get RP ID from env or use default */
+function getRpId(env: WorkerEnv): string {
+  return (env as any).AUTH_RP_ID || DEFAULT_RP_ID
+}
 
 // ─── Types ───
 
@@ -77,6 +82,11 @@ export async function handleAuthRoutes(
   env: WorkerEnv,
   pathname: string,
 ): Promise<Response | null> {
+  // Guard: require SESSION_SECRET for auth to work
+  if (!env.SESSION_SECRET && !env.SIGIL_DEPLOY_TOKEN) {
+    return jsonError('Auth not configured: SESSION_SECRET missing', 503)
+  }
+
   try {
     // ─── Passkey routes ───
     if (pathname === '/auth/passkey/register/options' && request.method === 'POST') {
@@ -158,7 +168,7 @@ async function handlePasskeyRegisterOptions(
     challenge: challengeB64,
     rp: {
       name: RP_NAME,
-      id: RP_ID,
+      id: getRpId(env),
     },
     user: {
       id: base64urlEncode(userIdBytes),
@@ -201,7 +211,7 @@ async function handlePasskeyRegisterVerify(
   }
 
   // Verify origin
-  const expectedOrigins = [`https://${RP_ID}`]
+  const expectedOrigins = [`https://${getRpId(env)}`]
   if (!expectedOrigins.includes(clientData.origin)) {
     return jsonError('Invalid origin', 400)
   }
@@ -234,7 +244,7 @@ async function handlePasskeyRegisterVerify(
   // 4. Verify rpIdHash (bytes 0-31)
   const rpIdHash = authData.slice(0, 32)
   const expectedRpIdHash = new Uint8Array(
-    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)),
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(getRpId(env))),
   )
   if (!arrayBufferEqual(rpIdHash, expectedRpIdHash)) {
     return jsonError('RP ID hash mismatch', 400)
@@ -383,7 +393,7 @@ async function handlePasskeyLoginOptions(
 
   return jsonOk({
     challenge: challengeB64,
-    rpId: RP_ID,
+    rpId: getRpId(env),
     userVerification: 'preferred',
     timeout: 60000,
   })
@@ -412,7 +422,7 @@ async function handlePasskeyLoginVerify(
   }
 
   // Verify origin
-  const expectedOrigins = [`https://${RP_ID}`]
+  const expectedOrigins = [`https://${getRpId(env)}`]
   if (!expectedOrigins.includes(clientData.origin)) {
     return jsonError('Invalid origin', 400)
   }
@@ -458,7 +468,7 @@ async function handlePasskeyLoginVerify(
   // Verify rpIdHash (bytes 0-31)
   const rpIdHash = authDataBytes.slice(0, 32)
   const expectedRpIdHash = new Uint8Array(
-    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)),
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(getRpId(env))),
   )
   if (!arrayBufferEqual(rpIdHash, expectedRpIdHash)) {
     return jsonError('RP ID hash mismatch', 400)
@@ -544,7 +554,7 @@ function handleGoogleLogin(_request: Request, env: WorkerEnv): Response {
     return jsonError('Google OAuth not configured', 503)
   }
 
-  const callbackUrl = `https://${RP_ID}/auth/google/callback`
+  const callbackUrl = `https://${getRpId(env)}/auth/google/callback`
   const state = base64urlEncode(crypto.getRandomValues(new Uint8Array(16)))
 
   const redirectUrl =
@@ -580,7 +590,7 @@ async function handleGoogleCallback(
     return jsonError('Authorization code missing', 400)
   }
 
-  const callbackUrl = `https://${RP_ID}/auth/google/callback`
+  const callbackUrl = `https://${getRpId(env)}/auth/google/callback`
 
   // Exchange code for token
   const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
