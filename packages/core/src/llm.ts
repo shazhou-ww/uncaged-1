@@ -5,6 +5,13 @@ import { SigilClient } from './sigil.js'
 import { Soul } from './soul.js'
 import { Memory } from './memory.js'
 import type { ChatMessage, ToolCall } from './chat-store.js'
+
+export type StreamEvent =
+  | { type: 'tool_start'; name: string; arguments: string }
+  | { type: 'tool_result'; name: string; content: string }
+  | { type: 'token'; text: string }
+  | { type: 'done' }
+  | { type: 'error'; message: string }
 import { 
   compose, 
   baseAdapter, 
@@ -243,6 +250,136 @@ export class LlmClient {
   }
 
   /**
+   * Run agentic loop with streaming support and dynamic tools derived from chat history.
+   * Emits SSE events for tool execution and token streaming.
+   */
+  async agentLoopStream(
+    messages: ChatMessage[],
+    sigil: SigilClient,
+    soul: Soul,
+    memory: Memory,
+    chatId: string | undefined,
+    onEvent: (event: StreamEvent) => void,
+  ): Promise<{ reply: string; updatedMessages: ChatMessage[] }> {
+
+    // Build system prompt from Soul + Instructions
+    const systemPrompt = await soul.buildSystemPrompt()
+
+    // Ensure system prompt is first
+    if (messages.length === 0 || messages[0].role !== 'system') {
+      messages = [{ role: 'system', content: systemPrompt }, ...messages]
+    } else {
+      messages[0].content = systemPrompt
+    }
+
+    // ── Apply pipeline ──
+    const pipeline = compose(
+      baseAdapter(this.model),
+      modelSelector(),
+      temperatureAdapter(),
+      knowledgeInjector(memory, chatId || 'unknown'),
+      contextCompressor(30),
+    )
+    
+    const params = await pipeline(messages, {
+      model: this.model,
+      temperature: 0.3,
+      enableThinking: true,
+      messages,
+    })
+    
+    // Use pipeline-determined params
+    const activeModel = params.model
+    const activeTemp = params.temperature
+    messages = params.messages  // possibly compressed
+    
+    // VL models don't support tools or enable_thinking properly
+    const isVisionModel = activeModel.includes('-vl-')
+    if (isVisionModel) {
+      console.log(`[Pipeline] Vision model detected — disabling tools & thinking`)
+    }
+
+    console.log(`[Pipeline] model=${activeModel} temp=${activeTemp} msgs=${messages.length}`)
+
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      // Derive dynamic tools from chat history (skip for vision models)
+      const allTools = isVisionModel ? [] : [
+        ...STATIC_TOOLS,
+        // Only add runner tools when RunnerHub is available
+        ...(this.runnerHub ? [execTool, runnerListTool] : []),
+        ...extractCapabilitiesFromHistory(messages).map(capabilityToTool),
+      ]
+
+      const response = await this.chatWithToolsStream(
+        messages, 
+        allTools, 
+        activeModel, 
+        activeTemp, 
+        isVisionModel,
+        (token) => onEvent({ type: 'token', text: token })
+      )
+
+      // No tool calls → final answer
+      if (!response.tool_calls || response.tool_calls.length === 0) {
+        const reply = response.content || '🤔 I had nothing to say.'
+        messages.push({ role: 'assistant', content: reply })
+        console.log(`[agent] round=${round} → final answer (${reply.length} chars)`)
+        onEvent({ type: 'done' })
+        return { reply, updatedMessages: messages }
+      }
+
+      // Add assistant message with tool calls
+      messages.push({
+        role: 'assistant',
+        content: response.content,
+        tool_calls: response.tool_calls,
+      })
+
+      // Execute each tool call
+      for (const tc of response.tool_calls) {
+        const args = typeof tc.function.arguments === 'string'
+          ? JSON.parse(tc.function.arguments)
+          : tc.function.arguments
+        console.log(`[agent] round=${round} tool=${tc.function.name} args=${JSON.stringify(args).slice(0, 200)}`)
+        
+        // Emit tool_start event
+        onEvent({ 
+          type: 'tool_start', 
+          name: tc.function.name, 
+          arguments: tc.function.arguments 
+        })
+
+        let result: string
+        try {
+          result = await this.executeTool(tc, sigil, memory)
+          console.log(`[agent] tool=${tc.function.name} result=${result.slice(0, 200)}`)
+        } catch (e: any) {
+          result = JSON.stringify({ error: e.message || 'Unknown error' })
+          console.error(`[agent] tool=${tc.function.name} error=${e.message}`)
+        }
+
+        // Emit tool_result event
+        onEvent({ 
+          type: 'tool_result', 
+          name: tc.function.name, 
+          content: result 
+        })
+
+        messages.push({
+          role: 'tool',
+          content: result,
+          tool_call_id: tc.id,
+        })
+      }
+    }
+
+    const fallback = '⚠️ Too many tool rounds. Could you rephrase your request?'
+    messages.push({ role: 'assistant', content: fallback })
+    onEvent({ type: 'done' })
+    return { reply: fallback, updatedMessages: messages }
+  }
+
+  /**
    * Run agentic loop with dynamic tools derived from chat history.
    * Soul defines personality + instructions, Memory provides long-term knowledge.
    */
@@ -406,6 +543,175 @@ export class LlmClient {
     }
 
     throw new Error('LLM request failed after retries')
+  }
+
+  private async chatWithToolsStream(
+    messages: ChatMessage[],
+    tools: ToolDef[],
+    model: string,
+    temperature: number,
+    skipThinking: boolean,
+    onToken: (token: string) => void,
+  ): Promise<{ content: string | null; tool_calls?: ToolCall[] }> {
+    const maxRetries = 2
+    
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const res = await fetch(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages,
+            tools: tools.length > 0 ? tools : undefined,
+            temperature,
+            stream: true, // Enable streaming
+            ...(skipThinking ? {} : { enable_thinking: true }),
+          }),
+          signal: AbortSignal.timeout(60000),  // 60s timeout for streaming
+        })
+
+        // Retry on 429 or 5xx
+        if (res.status === 429 || res.status >= 500) {
+          if (attempt < maxRetries) {
+            await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000))
+            continue
+          }
+        }
+
+        if (!res.ok) {
+          const body = await res.text()
+          throw new Error(`LLM streaming error: ${res.status} ${body}`)
+        }
+
+        if (!res.body) {
+          throw new Error('No response body for streaming')
+        }
+
+        return await this.parseStreamingResponse(res.body, onToken)
+      } catch (e: any) {
+        if (attempt < maxRetries && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+          await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000))
+          continue
+        }
+        throw e
+      }
+    }
+
+    throw new Error('LLM streaming request failed after retries')
+  }
+
+  private async parseStreamingResponse(
+    body: ReadableStream<Uint8Array>,
+    onToken: (token: string) => void,
+  ): Promise<{ content: string | null; tool_calls?: ToolCall[] }> {
+    const reader = body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let accumulatedContent = ''
+    let accumulatedToolCalls: ToolCall[] = []
+    
+    // Map to accumulate tool call fragments by index
+    const toolCallFragments = new Map<number, {
+      id?: string
+      type?: string
+      function?: { name?: string; arguments?: string }
+    }>()
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || '' // Keep the incomplete line
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed || trimmed === 'data: [DONE]') continue
+          
+          if (trimmed.startsWith('data: ')) {
+            const jsonStr = trimmed.slice(6).trim()
+            if (!jsonStr) continue
+
+            try {
+              const chunk = JSON.parse(jsonStr)
+              const delta = chunk.choices?.[0]?.delta
+              if (!delta) continue
+
+              // Handle text content tokens
+              if (delta.content) {
+                accumulatedContent += delta.content
+                onToken(delta.content)
+              }
+
+              // Handle tool calls delta
+              if (delta.tool_calls) {
+                for (const toolCallDelta of delta.tool_calls) {
+                  const index = toolCallDelta.index
+                  if (typeof index !== 'number') continue
+
+                  let fragment = toolCallFragments.get(index)
+                  if (!fragment) {
+                    fragment = { function: {} }
+                    toolCallFragments.set(index, fragment)
+                  }
+
+                  // Accumulate tool call properties
+                  if (toolCallDelta.id) {
+                    fragment.id = toolCallDelta.id
+                  }
+                  if (toolCallDelta.type) {
+                    fragment.type = toolCallDelta.type
+                  }
+                  if (toolCallDelta.function) {
+                    if (!fragment.function) fragment.function = {}
+                    if (toolCallDelta.function.name) {
+                      fragment.function.name = toolCallDelta.function.name
+                    }
+                    if (toolCallDelta.function.arguments) {
+                      fragment.function.arguments = (fragment.function.arguments || '') + toolCallDelta.function.arguments
+                    }
+                  }
+                }
+              }
+
+              // Check for completion
+              const finishReason = chunk.choices?.[0]?.finish_reason
+              if (finishReason === 'stop' || finishReason === 'tool_calls') {
+                // Convert accumulated tool call fragments to ToolCall array
+                accumulatedToolCalls = Array.from(toolCallFragments.entries())
+                  .sort(([a], [b]) => a - b) // Sort by index
+                  .map(([, fragment]) => ({
+                    id: fragment.id || `tool_${Date.now()}`,
+                    type: 'function' as const,
+                    function: {
+                      name: fragment.function?.name || '',
+                      arguments: fragment.function?.arguments || '{}',
+                    },
+                  }))
+                  .filter(tc => tc.function.name) // Only include valid tool calls
+
+                break
+              }
+            } catch (e) {
+              console.warn('[Stream] Failed to parse chunk:', jsonStr, e)
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock()
+    }
+
+    return {
+      content: accumulatedContent || null,
+      tool_calls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
+    }
   }
 
   private async executeTool(tc: ToolCall, sigil: SigilClient, memory: Memory): Promise<string> {

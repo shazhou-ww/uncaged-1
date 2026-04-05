@@ -494,6 +494,79 @@ async function routeRequest(
     }
   }
 
+  if (pathname === '/api/chat/stream' && request.method === 'POST') {
+    // Authenticate via JWT cookie or Bearer token
+    const { extractUserIdFromRequest } = await import('./auth.js')
+    const userId = await extractUserIdFromRequest(request, env)
+    if (!userId) {
+      return new Response(JSON.stringify({ error: '未登录，请先登录' }), {
+        status: 401, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    const { sigil, llm, chatStore, soul, memory } = clients
+    const body = await request.json() as { message?: string }
+    const userMessage = body.message?.trim()
+    if (!userMessage) {
+      return new Response(JSON.stringify({ error: 'message required' }), {
+        status: 400, headers: { 'Content-Type': 'application/json' },
+      })
+    }
+
+    // Create a TransformStream for SSE
+    const { readable, writable } = new TransformStream()
+    const writer = writable.getWriter()
+    const encoder = new TextEncoder()
+
+    // Start the async work in the background
+    const streamPromise = (async () => {
+      try {
+        const chatId = `web:${userId}`
+        let messages = await chatStore.load(chatId)
+        const { messages: compressed } = chatStore.maybeCompress(messages)
+        messages = compressed
+        messages.push({ role: 'user' as const, content: userMessage })
+
+        const memorySessionId = `${instanceId}:${userId}`
+        const { reply, updatedMessages } = await llm.agentLoopStream(
+          messages, sigil, soul, memory, memorySessionId,
+          (event) => {
+            writer.write(encoder.encode(`data: ${JSON.stringify(event)}\n\n`))
+          }
+        )
+
+        // Save to store after streaming completes
+        await chatStore.save(chatId, updatedMessages)
+        Promise.allSettled([
+          memory.store(userMessage, 'user', memorySessionId),
+          memory.store(reply, 'assistant', memorySessionId),
+        ])
+      } catch (e: any) {
+        console.error('[chat stream] error:', e)
+        writer.write(encoder.encode(`data: ${JSON.stringify({ 
+          type: 'error', 
+          message: '抱歉，遇到了问题，请稍后重试 😥' 
+        })}\n\n`))
+      } finally {
+        writer.close()
+      }
+    })()
+
+    // Use waitUntil to keep the worker alive
+    ctx.waitUntil(streamPromise)
+
+    return new Response(readable, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      },
+    })
+  }
+
   if (pathname === '/api/history' && request.method === 'GET') {
     const { extractUserIdFromRequest } = await import('./auth.js')
     const userId = await extractUserIdFromRequest(request, env)
