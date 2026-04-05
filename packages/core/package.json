@@ -38,6 +38,10 @@
       "types": "./dist/chat-key.d.ts",
       "default": "./dist/chat-key.js"
     },
+    "./identity": {
+      "types": "./dist/identity.d.ts",
+      "default": "./dist/identity.js"
+    },
     "./chat-store": {
       "types": "./dist/chat-store.d.ts",
       "default": "./dist/chat-store.js"

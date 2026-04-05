@@ -9,6 +9,7 @@ import { Soul } from '@uncaged/core/soul'
 import { Memory } from '@uncaged/core/memory'
 import { BatonStore, type BatonEvent } from '@uncaged/core/baton'
 import { handleBatonQueue, type NotifyFn } from '@uncaged/core/baton-runner'
+import { IdentityResolver } from '@uncaged/core/identity'
 import { handleCommonRoutes } from './router.js'
 import { handleTelegramRoutes, sendTelegram } from './channels/telegram.js'
 import { handleWebRoutes } from './channels/web.js'
@@ -61,7 +62,8 @@ function buildClients(env: WorkerEnv, instanceId: string) {
   const chatStore = new ChatStore(env.CHAT_KV)
   const soul = new Soul(env.CHAT_KV, instanceId)
   const memory = new Memory(env.MEMORY_INDEX, env.AI, instanceId, env.MEMORY_DB)
-  return { sigil, llm, chatStore, soul, memory }
+  const identity = env.MEMORY_DB ? new IdentityResolver(env.MEMORY_DB) : null
+  return { sigil, llm, chatStore, soul, memory, identity }
 }
 
 export default {
