@@ -138,54 +138,52 @@ export function ToolCall({ name, input, result, icon = '🔧', toolResult, resul
   const hasToolResult = !!toolResult
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden">
-      <Collapsible
-        trigger={
-          <span className="text-[0.85rem] text-text-3 hover:text-text-2 transition-colors block">
-            {icon} {name}
-            {resultPending && (
-              <span className="ml-2 inline-flex items-center gap-1 text-text-4">
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
-                <span className="text-[0.75rem]">运行中…</span>
-              </span>
-            )}
-          </span>
-        }
-      >
-        <div className="border-t border-border px-3 py-3 space-y-3">
-          {hasInput && (
-            <div>
-              <div className="text-[0.75rem] text-text-4 mb-2 font-medium">参数</div>
-              {formatArguments(input!)}
-            </div>
+    <Collapsible
+      trigger={
+        <span className="text-[0.85rem] text-text-3 hover:text-text-2 transition-colors block">
+          {icon} {name}
+          {resultPending && (
+            <span className="ml-2 inline-flex items-center gap-1 text-text-4">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+              <span className="text-[0.75rem]">运行中…</span>
+            </span>
           )}
-          
-          {hasResult && (
-            <div>
-              {hasInput && <div className="text-[0.75rem] text-text-4 mb-2 font-medium">结果</div>}
-              {formatResult(result!)}
-            </div>
-          )}
+        </span>
+      }
+    >
+      <div className="px-4 py-3 space-y-3 bg-white/[0.02]">
+        {hasInput && (
+          <div>
+            <div className="text-[0.75rem] text-text-4 mb-2 font-medium">参数</div>
+            {formatArguments(input!)}
+          </div>
+        )}
+        
+        {hasResult && (
+          <div>
+            {hasInput && <div className="text-[0.75rem] text-text-4 mb-2 font-medium">结果</div>}
+            {formatResult(result!)}
+          </div>
+        )}
 
-          {hasToolResult && (
-            <div>
-              <div className="text-[0.75rem] text-text-4 mb-2 font-medium">结果</div>
-              {renderToolResultContent(toolResult!)}
-            </div>
-          )}
-          
-          {!hasInput && !hasResult && !hasToolResult && !resultPending && (
-            <span className="text-text-4 italic text-[0.85rem]">无内容</span>
-          )}
+        {hasToolResult && (
+          <div>
+            <div className="text-[0.75rem] text-text-4 mb-2 font-medium">结果</div>
+            {renderToolResultContent(toolResult!)}
+          </div>
+        )}
+        
+        {!hasInput && !hasResult && !hasToolResult && !resultPending && (
+          <span className="text-text-4 italic text-[0.85rem]">无内容</span>
+        )}
 
-          {resultPending && !hasToolResult && (
-            <div className="flex items-center gap-2 text-text-4 text-[0.85rem]">
-              <span className="inline-block w-4 h-4 border-2 border-text-4 border-t-accent rounded-full animate-spin" />
-              等待结果…
-            </div>
-          )}
-        </div>
-      </Collapsible>
-    </div>
+        {resultPending && !hasToolResult && (
+          <div className="flex items-center gap-2 text-text-4 text-[0.85rem]">
+            <span className="inline-block w-4 h-4 border-2 border-text-4 border-t-accent rounded-full animate-spin" />
+            等待结果…
+          </div>
+        )}
+      </div>
+    </Collapsible>
   )
 }

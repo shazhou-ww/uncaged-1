@@ -196,15 +196,13 @@ function ToolSectionView({ section }: { section: ToolSection }) {
   }
 
   return (
-    <div className="px-3 py-2">
-      <ToolCall
-        name={section.toolCall.function.name}
-        input={parsedArgs}
-        icon="🔧"
-        toolResult={section.toolResult}
-        resultPending={section.resultPending}
-      />
-    </div>
+    <ToolCall
+      name={section.toolCall.function.name}
+      input={parsedArgs}
+      icon="🔧"
+      toolResult={section.toolResult}
+      resultPending={section.resultPending}
+    />
   )
 }
 
