@@ -4,13 +4,13 @@
 
 ## What is Uncaged?
 
-Uncaged is an AI agent running on Cloudflare Workers. It uses [Sigil](https://github.com/oc-xiaoju/sigil) as its capability registry — when it encounters a problem, it searches for an existing capability, creates one if needed, and uses it immediately. All through a Telegram bot interface.
+Uncaged is a multi-tenant AI agent running on Cloudflare Workers. It uses [Sigil](https://github.com/oc-xiaoju/sigil) as its capability registry — when it encounters a problem, it searches for an existing capability, creates one if needed, and uses it immediately. Available via Telegram bot, web chat, and direct API.
 
 ### The Key Insight: Tools = f(Chat History)
 
 Most AI agents have a static tool list. Uncaged's tools are **dynamic** — they're derived from the conversation history:
 
-1. When the LLM calls `sigil_query`, the results appear as callable tools in the next round
+1. When the LLM calls `create_capability`, the result appears as a callable tool in the next round
 2. When context compression drops old query results, the corresponding tools **automatically disappear**
 3. Re-querying Sigil **reloads** them
 
@@ -28,19 +28,21 @@ The context window is the "physical memory" — it naturally limits how many too
 ## Architecture
 
 ```
-Telegram → Webhook → CF Worker (Uncaged) → LLM (DashScope/Qwen)
-                         ↕                       ↕
-                     Chat KV              Sigil (Capability Registry)
-                   (history)              (query/deploy/run)
+Telegram / Web / API → CF Worker (Uncaged) → LLM (DashScope/Qwen)
+                           ↕                       ↕
+                     KV (Chat History)     Sigil (Capability Registry)
+                     D1 (Memory, Identity) Vectorize (Semantic Search)
+                     Durable Objects (RunnerHub)
+                     Queues (Baton Tasks)
 ```
 
 ### How It Works
 
-1. User sends a message via Telegram
+1. User sends a message via Telegram, Web, or API
 2. Uncaged loads chat history from KV
-3. **Derives dynamic tools** from history (sigil_query results + deploy calls)
-4. Sends to LLM with static tools (`sigil_query`, `sigil_deploy`) + dynamic tools (`cap_*`)
-5. LLM decides: answer directly / query Sigil / create capability / use capability
+3. **Derives dynamic tools** from history (capability results + deploy calls)
+4. Sends to LLM with static tools + conditional tools + dynamic tools (`cap_*`)
+5. LLM decides: answer directly / create capability / use capability / distill knowledge / spawn tasks
 6. Tool results feed back to LLM (agentic loop, max 6 rounds)
 7. Final response sent to user, history saved
 
@@ -53,16 +55,61 @@ If a tool call fails, the error is fed back to the LLM as a tool result. The LLM
 
 No hard crashes on tool errors — the agent adapts.
 
+## Project Structure
+
+Monorepo layout:
+
+```
+packages/
+├── core/     — Shared business logic (LLM, Sigil, ChatStore, Memory, Pipeline, Tools, Auth)
+├── worker/   — CF Worker entry point + channel handlers (Telegram, Web) + routing
+├── web/      — React SPA frontend (chat UI, auth flows)
+├── runner/   — CLI client for remote code execution (pairs with RunnerHub DO)
+└── health/   — Health check dashboard
+```
+
+## Channels
+
+| Channel | Domain | Description |
+|---------|--------|-------------|
+| Telegram | `doudou.shazhou.work` | Bot interface via webhooks |
+| Web | `xiaomai.shazhou.work` | React SPA with SSE streaming |
+| API | `uncaged.shazhou.work/chat` | Direct chat API (POST) |
+
+Routing is domain-based — the same Worker handles all channels, dispatching by hostname.
+
 ## Static vs Dynamic Tools
 
 **Static (always available):**
-- `sigil_query` — Search for capabilities
-- `sigil_deploy` — Create new capabilities
+- `create_capability` — Create new serverless capabilities (self-evolution)
+- `distill_knowledge` — Save important information to long-term memory
+- `recall_knowledge` — Search long-term memory across all sessions
+- `ask_agent` — Collaborate with other AI agents via A2A
+- `spawn_task` — Run parallel sub-tasks via Baton queue
 
-**Dynamic (loaded from history):**
-- `cap_{name}` — Any capability discovered via `sigil_query` or created via `sigil_deploy`
-- Automatically maps to `sigil.run(name, params)`
-- Schema comes directly from Sigil's capability metadata
+**Conditional (available when Runner is connected):**
+- `exec` — Execute shell commands on a connected Runner
+- `runner_list` — List connected Runner clients
+
+**Dynamic (loaded from conversation context):**
+- `cap_{name}` — Capabilities discovered via sigil_query or created via `create_capability`
+- Automatically maps to Sigil's local execution engine
+- Schema comes directly from capability metadata
+
+## LLM Pipeline
+
+Uncaged uses an adapter pipeline to select the best model per request:
+
+- Image messages → `qwen3-vl-plus` (vision model)
+- Code-heavy prompts → `qwen3-coder-plus`
+- Simple greetings → `qwen3.5-flash` (fast)
+- Default reasoning → `qwen3-max`
+
+## Runner
+
+Runner is a CLI client (`packages/runner/`) that connects to the RunnerHub Durable Object via WebSocket. It lets Uncaged execute shell commands on a remote machine — your laptop, a server, anything with Node.js.
+
+Pairing flow: the agent calls `connect_computer` to generate a short-lived pairing code, then the Runner CLI uses that code to establish a persistent WebSocket session.
 
 ## Context Compression
 
@@ -70,18 +117,28 @@ When chat history exceeds 40 messages:
 - Keeps the first user message + last 10 messages
 - Drops intermediate tool call chains
 - Orphaned tool results (without parent assistant message) are cleaned up
-- **Side effect**: capabilities from dropped `sigil_query` results disappear from tools
+- **Side effect**: capabilities from dropped results disappear from tools
 
 This is not a bug — it's the mechanism that implements automatic tool unloading.
+
+## Authentication
+
+Multi-tenant auth system:
+
+- **Google OAuth** — Primary sign-in method
+- **Passkey / WebAuthn** — Passwordless biometric authentication
+- **JWT sessions** — Short-lived access tokens with refresh token rotation
+
+Identity is stored in D1 (`users`, `credentials`, `agents`, `channels` tables).
 
 ## Setup
 
 ### Prerequisites
 
-- Cloudflare account (Workers paid plan, $5/mo)
+- Cloudflare account (Workers paid plan)
 - Telegram Bot (via @BotFather)
 - DashScope API key (Alibaba Cloud)
-- Sigil instance deployed
+- Google OAuth credentials (for web auth)
 
 ### Deploy
 
@@ -90,39 +147,73 @@ This is not a bug — it's the mechanism that implements automatic tool unloadin
 git clone https://github.com/oc-xiaoju/uncaged
 cd uncaged
 
-# Install
+# Install (monorepo)
 npm install
 
-# Deploy via CF API (or wrangler deploy if auth is configured)
-# See deploy script or use wrangler
+# Build web frontend
+npm run build -w packages/web
+
+# Deploy worker
+npx wrangler deploy -c packages/worker/wrangler.toml
 
 # Set secrets
 wrangler secret put TELEGRAM_BOT_TOKEN
 wrangler secret put DASHSCOPE_API_KEY
-wrangler secret put SIGIL_DEPLOY_TOKEN
+wrangler secret put GOOGLE_CLIENT_ID
+wrangler secret put GOOGLE_CLIENT_SECRET
+wrangler secret put SESSION_SECRET
 
 # Register Telegram webhook
-curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://uncaged.<subdomain>.workers.dev/webhook"
+curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://doudou.shazhou.work/webhook"
 ```
 
 ### Environment
 
+**Shared:**
+
+| Variable | Description |
+|----------|-------------|
+| `DASHSCOPE_API_KEY` | Alibaba DashScope API key |
+| `LLM_MODEL` | Override default model (optional) |
+| `LLM_BASE_URL` | Override LLM endpoint (optional) |
+| `A2A_TOKEN` | A2A authentication token (optional) |
+| `DEBUG_ENABLED` | Enable debug logging (optional) |
+
+**Telegram channel:**
+
 | Variable | Description |
 |----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token |
-| `DASHSCOPE_API_KEY` | Alibaba DashScope API key |
-| `SIGIL_DEPLOY_TOKEN` | Sigil deploy auth token |
-| `SIGIL_URL` | Sigil base URL (use custom domain to avoid CF 1042) |
-| `CHAT_KV` | KV namespace for chat history |
+| `ALLOWED_CHAT_IDS` | Comma-separated allowed Telegram chat IDs |
 
-### CF 1042 Note
+**Web channel:**
 
-If Uncaged and Sigil are on the same Cloudflare account, you **must** use a custom domain for Sigil (e.g., `sigil.yourdomain.com`), not `*.workers.dev`. CF Workers cannot fetch each other via `.workers.dev` subdomains (error 1042).
+| Variable | Description |
+|----------|-------------|
+| `GOOGLE_CLIENT_ID` | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
+| `SESSION_SECRET` | JWT signing secret |
+
+**Bindings (wrangler.toml):**
+
+| Binding | Type | Purpose |
+|---------|------|---------|
+| `CHAT_KV` | KV | Chat history storage |
+| `SIGIL_KV` | KV | Local capability registry |
+| `MEMORY_DB` | D1 | Long-term memory + identity tables |
+| `BATON_DB` | D1 | Task queue state |
+| `MEMORY_INDEX` | Vectorize | Semantic search for knowledge recall |
+| `RUNNER_HUB` | Durable Object | WebSocket hub for Runner clients |
+| `BATON_QUEUE` | Queue | Async task execution |
+| `LOADER` | Worker Loader | Sigil local execution engine |
+| `AI` | Workers AI | AI model binding |
 
 ## Bot Commands
 
 - `/start` — Reset conversation
-- `/clear` — Clear chat history
+- `/clear` — Clear chat history (memory retained)
+- `/soul` — Show personality
+- `/help` — Show available commands
 
 ## Example Interactions
 
@@ -136,23 +227,12 @@ Bot: [queries Sigil → finds "encode" → calls cap_encode → returns result]
 **Creating a new capability:**
 ```
 User: I need a SHA-256 hash calculator
-Bot: [queries Sigil → not found → deploys sha256-hash → confirms]
+Bot: [creates capability via create_capability → deploys sha256-hash]
      🔮 Created capability "sha256-hash"! Try asking me to hash something.
 
 User: Hash "hello world"
 Bot: [calls cap_sha256_hash directly]
      SHA-256: b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
-```
-
-## Project Structure
-
-```
-src/
-├── index.ts        — CF Worker entry point
-├── telegram.ts     — Telegram webhook handler
-├── llm.ts          — LLM client with dynamic tool loading + agentic loop
-├── sigil.ts        — Sigil API client
-└── chat-store.ts   — KV-backed chat history with compression
 ```
 
 ## Part of Uncaged
