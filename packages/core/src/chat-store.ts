@@ -42,6 +42,16 @@ const COMPRESS_KEEP_RECENT = 10
 const CHAT_TTL = 86400
 
 export class ChatStore {
+  /** Non-system message count in KV when load() ran (for detecting concurrent writes). */
+  private readonly kvNonSystemBaselineByChat = new Map<string, number>()
+  /**
+   * Non-system count after maybeCompress() for this chat (defaults to KV baseline until compress runs).
+   * Used to slice out only messages appended since load/compress.
+   */
+  private readonly sliceNonSystemBaselineByChat = new Map<string, number>()
+  /** chatId from the last load(); used by maybeCompress to attribute slice baseline updates. */
+  private activeChatId: string | null = null
+
   constructor(private kv: KVNamespace) {}
 
   private key(chatId: number | string): string {
@@ -49,22 +59,61 @@ export class ChatStore {
   }
 
   async load(chatId: number | string): Promise<ChatMessage[]> {
+    const key = String(chatId)
+    this.activeChatId = key
+
     const raw = await this.kv.get(this.key(chatId))
-    if (!raw) return []
+    if (!raw) {
+      this.kvNonSystemBaselineByChat.set(key, 0)
+      this.sliceNonSystemBaselineByChat.set(key, 0)
+      return []
+    }
     try {
-      return JSON.parse(raw)
+      const parsed: ChatMessage[] = JSON.parse(raw)
+      const nonSystem = parsed.filter(m => m.role !== 'system').length
+      this.kvNonSystemBaselineByChat.set(key, nonSystem)
+      this.sliceNonSystemBaselineByChat.set(key, nonSystem)
+      return parsed
     } catch {
+      this.kvNonSystemBaselineByChat.set(key, 0)
+      this.sliceNonSystemBaselineByChat.set(key, 0)
       return []
     }
   }
 
   async save(chatId: number | string, messages: ChatMessage[]): Promise<void> {
     // Strip system messages before saving (reconstructed each request)
-    const toSave = messages.filter(m => m.role !== 'system')
+    const key = String(chatId)
+    let toSave = messages.filter(m => m.role !== 'system')
+    const kvBaseline = this.kvNonSystemBaselineByChat.get(key) ?? 0
+    const sliceBaseline = this.sliceNonSystemBaselineByChat.get(key) ?? kvBaseline
+
+    // Re-read KV immediately before write to shrink the lost-update window.
+    // For true serialisation under high concurrency, use Durable Objects (or similar).
+    const raw = await this.kv.get(this.key(chatId))
+    let fresh: ChatMessage[] = []
+    if (raw) {
+      try {
+        fresh = JSON.parse(raw)
+      } catch {
+        fresh = []
+      }
+    }
+    const freshNonSystem = fresh.filter(m => m.role !== 'system')
+
+    if (freshNonSystem.length > kvBaseline) {
+      const ourNew =
+        sliceBaseline <= toSave.length ? toSave.slice(sliceBaseline) : toSave
+      toSave = [...freshNonSystem, ...ourNew]
+    }
+
     await this.kv.put(this.key(chatId), JSON.stringify(toSave), { expirationTtl: CHAT_TTL })
   }
 
   async clear(chatId: number | string): Promise<void> {
+    const key = String(chatId)
+    this.kvNonSystemBaselineByChat.delete(key)
+    this.sliceNonSystemBaselineByChat.delete(key)
     await this.kv.delete(this.key(chatId))
   }
 
@@ -107,6 +156,13 @@ export class ChatStore {
     // we need to include the preceding assistant tool_call message
     // Walk backwards from the cut point to find orphaned tool messages
     const cleaned = this.ensureToolConsistency(compressed)
+
+    if (this.activeChatId != null) {
+      this.sliceNonSystemBaselineByChat.set(
+        this.activeChatId,
+        cleaned.filter(m => m.role !== 'system').length,
+      )
+    }
 
     return { messages: cleaned, compressed: true }
   }
