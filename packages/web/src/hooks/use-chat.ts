@@ -58,33 +58,51 @@ export function useChat(basePath: string): ChatState {
     try {
       await apiSendMessageStream(basePathRef.current, text, (event: StreamEvent) => {
         if (event.type === 'token') {
-          // Append token to last assistant message
           setMessages(prev => {
             const msgs = [...prev]
             const last = msgs[msgs.length - 1]
-            if (last.role === 'assistant') {
-              msgs[msgs.length - 1] = {
-                ...last,
-                content: (typeof last.content === 'string' ? last.content : '') + event.text,
-              }
+            if (last.role !== 'assistant') {
+              // New ReAct round: create a fresh assistant message
+              return [...msgs, {
+                role: 'assistant' as const,
+                content: event.text,
+                timestamp: Date.now(),
+              }]
+            }
+            msgs[msgs.length - 1] = {
+              ...last,
+              content: (typeof last.content === 'string' ? last.content : '') + event.text,
             }
             return msgs
           })
         }
         if (event.type === 'tool_start') {
-          // Add tool_call info to assistant message
           setMessages(prev => {
             const msgs = [...prev]
-            const lastAssistant = msgs.findLast(m => m.role === 'assistant')
-            if (lastAssistant) {
-              const existing = lastAssistant.tool_calls || []
-              lastAssistant.tool_calls = [...existing, {
-                id: `tc_${Date.now()}`,
-                type: 'function',
-                function: { name: event.name, arguments: event.arguments },
+            const last = msgs[msgs.length - 1]
+            if (last.role !== 'assistant') {
+              // New ReAct round: create a fresh assistant message for this tool_call
+              return [...msgs, {
+                role: 'assistant' as const,
+                content: '',
+                timestamp: Date.now(),
+                tool_calls: [{
+                  id: `tc_${Date.now()}`,
+                  type: 'function' as const,
+                  function: { name: event.name, arguments: event.arguments },
+                }],
               }]
             }
-            return [...msgs]  // force re-render
+            const existing = last.tool_calls || []
+            msgs[msgs.length - 1] = {
+              ...last,
+              tool_calls: [...existing, {
+                id: `tc_${Date.now()}`,
+                type: 'function' as const,
+                function: { name: event.name, arguments: event.arguments },
+              }],
+            }
+            return [...msgs]
           })
         }
         if (event.type === 'tool_result') {
