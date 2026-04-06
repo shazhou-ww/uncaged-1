@@ -1,5 +1,9 @@
 # Uncaged 🔓
 
+<p align="center">
+  <img src="assets/logo.jpg" alt="Uncaged Logo" width="200" />
+</p>
+
 **Sigil-native AI Agent** — An AI that discovers, creates, and uses serverless capabilities on the fly.
 
 ## What is Uncaged?
