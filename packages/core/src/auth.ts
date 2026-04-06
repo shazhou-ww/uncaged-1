@@ -128,7 +128,11 @@ export class Auth {
     if (!valid) return null
 
     try {
-      const decoded = JSON.parse(new TextDecoder().decode(base64urlDecode(payload))) as JwtPayload
+      const decoded = JSON.parse(new TextDecoder().decode(base64urlDecode(payload))) as JwtPayload & {
+        type?: string
+      }
+      // Reject legacy refresh JWTs if presented as access tokens (e.g. Bearer misuse)
+      if (decoded.type === 'refresh') return null
       const now = Math.floor(Date.now() / 1000)
       if (decoded.exp <= now) return null
       return decoded

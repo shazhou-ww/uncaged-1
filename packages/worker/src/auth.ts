@@ -14,13 +14,12 @@
  *
  * Passkey (WebAuthn) verification uses pure Web Crypto API — no npm dependencies.
  * CBOR decoding is implemented inline (minimal, only what WebAuthn needs).
- * JWT signing/verification uses HMAC-SHA256 via crypto.subtle.
- *
- * TODO: Import Auth class from @uncaged/core/auth once it exists, replacing
- *       the inline JWT helpers below.
+ * Access-token verification and refresh-token rotation use @uncaged/core/auth.
+ * JWT/Web Crypto details live in core; this file keeps WebAuthn helpers only.
  */
 
 import type { WorkerEnv } from './index.js'
+import { Auth } from '@uncaged/core/auth'
 import { IdentityResolver } from '@uncaged/core/identity'
 
 // ─── Constants ───
@@ -28,8 +27,6 @@ import { IdentityResolver } from '@uncaged/core/identity'
 const DEFAULT_RP_ID = 'uncaged.shazhou.work'
 const RP_NAME = 'Uncaged'
 const CHALLENGE_TTL = 60 // seconds
-const ACCESS_TOKEN_TTL = 60 * 60 // 1 hour
-const REFRESH_TOKEN_TTL = 30 * 24 * 60 * 60 // 30 days
 
 /** Get RP ID from env or use default */
 function getRpId(env: WorkerEnv): string {
@@ -37,14 +34,6 @@ function getRpId(env: WorkerEnv): string {
 }
 
 // ─── Types ───
-
-interface JWTPayload {
-  sub: string // user_id
-  iat: number
-  exp: number
-  type: 'access' | 'refresh'
-  displayName?: string
-}
 
 interface ChallengeData {
   type: 'register' | 'login'
@@ -327,8 +316,7 @@ async function handlePasskeyRegisterVerify(
     await kv.delete(challengeKey)
 
     // 9. Issue JWT tokens and set HttpOnly cookies
-    const { Auth } = await import('@uncaged/core/auth')
-    const auth = new Auth(getJwtSecret(env), env.CHAT_KV)
+    const auth = createAuth(env)
     const tokens = await auth.issueTokens(userId, challengeData.displayName)
     const cookies = auth.buildCookies(tokens)
 
@@ -370,8 +358,7 @@ async function handlePasskeyRegisterVerify(
   await kv.delete(challengeKey)
 
   // Issue JWT tokens and set HttpOnly cookies
-  const { Auth } = await import('@uncaged/core/auth')
-  const auth = new Auth(getJwtSecret(env), env.CHAT_KV)
+  const auth = createAuth(env)
   const tokens = await auth.issueTokens(userId, challengeData.displayName)
   const cookies = auth.buildCookies(tokens)
 
@@ -551,8 +538,7 @@ async function handlePasskeyLoginVerify(
   await kv.delete(challengeKey)
 
   // 9. Issue JWT tokens and set HttpOnly cookies
-  const { Auth } = await import('@uncaged/core/auth')
-  const auth = new Auth(getJwtSecret(env), env.CHAT_KV)
+  const auth = createAuth(env)
   const tokens = await auth.issueTokens(credRow.user_id, credRow.display_name)
   const cookies = auth.buildCookies(tokens)
 
@@ -686,8 +672,7 @@ async function handleGoogleCallback(
   }
 
   // Issue tokens and set cookies
-  const { Auth } = await import('@uncaged/core/auth')
-  const auth = new Auth(getJwtSecret(env), env.CHAT_KV)
+  const auth = createAuth(env)
   const tokens = await auth.issueTokens(
     resolved.userId,
     userInfo.name || userInfo.email,
@@ -782,45 +767,27 @@ async function handleRefresh(request: Request, env: WorkerEnv): Promise<Response
     return jsonError('Missing refreshToken', 400)
   }
 
-  const kv = env.CHAT_KV
-
-  // Verify the refresh token
-  const payload = await verifyJwt(refreshToken, env)
-  if (!payload || payload.type !== 'refresh') {
+  const auth = createAuth(env)
+  const refreshed = await auth.refresh(refreshToken)
+  if (!refreshed) {
     return jsonError('Invalid or expired refresh token', 401)
   }
 
-  // Check if token has been revoked
-  const revoked = await kv.get(`revoked:${refreshToken}`)
-  if (revoked) {
-    return jsonError('Token has been revoked', 401)
-  }
-
-  // Issue new access token and update the access_token cookie
-  const accessToken = await signJwt(
-    {
-      sub: payload.sub,
-      type: 'access',
-      displayName: payload.displayName,
-      iat: Math.floor(Date.now() / 1000),
-      exp: Math.floor(Date.now() / 1000) + ACCESS_TOKEN_TTL,
-    },
-    env,
-  )
-
   const headers = new Headers()
   headers.append('Content-Type', 'application/json')
-  headers.append('Set-Cookie', `access_token=${accessToken}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${ACCESS_TOKEN_TTL}`)
+  headers.append(
+    'Set-Cookie',
+    `access_token=${refreshed.accessToken}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${refreshed.expiresIn}`,
+  )
 
   return new Response(JSON.stringify({
-    accessToken,
-    expiresIn: ACCESS_TOKEN_TTL,
+    accessToken: refreshed.accessToken,
+    expiresIn: refreshed.expiresIn,
   }), { status: 200, headers })
 }
 
 async function handleLogout(request: Request, env: WorkerEnv): Promise<Response> {
   const body = await safeJsonBody<{ refreshToken?: string }>(request)
-  const kv = env.CHAT_KV
 
   // Try to get refresh token from body first, then from cookies
   let refreshTokenToRevoke = body?.refreshToken
@@ -833,18 +800,9 @@ async function handleLogout(request: Request, env: WorkerEnv): Promise<Response>
     }
   }
 
-  // Revoke refresh token if found
   if (refreshTokenToRevoke) {
-    const payload = await verifyJwt(refreshTokenToRevoke, env)
-    if (payload && payload.type === 'refresh') {
-      // Store in KV as revoked until it would have expired
-      const ttl = payload.exp - Math.floor(Date.now() / 1000)
-      if (ttl > 0) {
-        await kv.put(`revoked:${refreshTokenToRevoke}`, '1', {
-          expirationTtl: ttl,
-        })
-      }
-    }
+    const auth = createAuth(env)
+    await auth.revokeRefreshToken(refreshTokenToRevoke)
   }
 
   // Clear cookies by setting them with Max-Age=0
@@ -860,7 +818,7 @@ async function handleLogout(request: Request, env: WorkerEnv): Promise<Response>
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// JWT Helpers (inline HMAC-SHA256 — TODO: replace with @uncaged/core/auth)
+// JWT — secret + Auth (see @uncaged/core/auth)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function getJwtSecret(env: WorkerEnv): string {
@@ -868,91 +826,8 @@ function getJwtSecret(env: WorkerEnv): string {
   return env.SESSION_SECRET || env.SIGIL_DEPLOY_TOKEN
 }
 
-async function getHmacKey(env: WorkerEnv): Promise<CryptoKey> {
-  const secret = getJwtSecret(env)
-  return crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign', 'verify'],
-  )
-}
-
-async function signJwt(payload: JWTPayload, env: WorkerEnv): Promise<string> {
-  const header = { alg: 'HS256', typ: 'JWT' }
-  const headerB64 = base64urlEncode(new TextEncoder().encode(JSON.stringify(header)))
-  const payloadB64 = base64urlEncode(new TextEncoder().encode(JSON.stringify(payload)))
-  const signingInput = `${headerB64}.${payloadB64}`
-
-  const key = await getHmacKey(env)
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(signingInput))
-  const sigB64 = base64urlEncode(new Uint8Array(sig))
-
-  return `${signingInput}.${sigB64}`
-}
-
-async function verifyJwt(
-  token: string,
-  env: WorkerEnv,
-): Promise<JWTPayload | null> {
-  const parts = token.split('.')
-  if (parts.length !== 3) return null
-
-  const [headerB64, payloadB64, sigB64] = parts
-  const signingInput = `${headerB64}.${payloadB64}`
-
-  const key = await getHmacKey(env)
-  const sig = base64urlDecode(sigB64)
-  const valid = await crypto.subtle.verify(
-    'HMAC',
-    key,
-    sig,
-    new TextEncoder().encode(signingInput),
-  )
-  if (!valid) return null
-
-  const payload: JWTPayload = JSON.parse(
-    new TextDecoder().decode(base64urlDecode(payloadB64)),
-  )
-
-  // Check expiration
-  const now = Math.floor(Date.now() / 1000)
-  if (payload.exp && payload.exp < now) return null
-
-  return payload
-}
-
-async function issueTokens(
-  userId: string,
-  displayName: string,
-  env: WorkerEnv,
-): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
-  const now = Math.floor(Date.now() / 1000)
-
-  const accessToken = await signJwt(
-    {
-      sub: userId,
-      type: 'access',
-      displayName,
-      iat: now,
-      exp: now + ACCESS_TOKEN_TTL,
-    },
-    env,
-  )
-
-  const refreshToken = await signJwt(
-    {
-      sub: userId,
-      type: 'refresh',
-      displayName,
-      iat: now,
-      exp: now + REFRESH_TOKEN_TTL,
-    },
-    env,
-  )
-
-  return { accessToken, refreshToken, expiresIn: ACCESS_TOKEN_TTL }
+function createAuth(env: WorkerEnv): Auth {
+  return new Auth(getJwtSecret(env), env.CHAT_KV)
 }
 
 /** Exported version for use by other modules (e.g., index.ts chat API) */
@@ -967,27 +842,21 @@ async function extractUserIdFromToken(
   request: Request,
   env: WorkerEnv,
 ): Promise<string | null> {
-  // 1. Check Authorization header first (for API clients)
+  const auth = createAuth(env)
+
   const authHeader = request.headers.get('Authorization')
   if (authHeader?.startsWith('Bearer ')) {
     const token = authHeader.slice(7)
-    const payload = await verifyJwt(token, env)
-    // Accept tokens with type='access' or no type field (core auth compat)
-    if (payload && (!payload.type || payload.type === 'access')) {
-      return payload.sub
-    }
+    const payload = await auth.verifyAccessToken(token)
+    if (payload) return payload.sub
   }
 
-  // 2. Check cookies (for web clients)
   const cookie = request.headers.get('Cookie') || ''
   const accessTokenMatch = cookie.match(/access_token=([^;]+)/)
   if (accessTokenMatch) {
     const token = accessTokenMatch[1]
-    const payload = await verifyJwt(token, env)
-    // Accept tokens with type='access' or no type field (core auth compat)
-    if (payload && (!payload.type || payload.type === 'access')) {
-      return payload.sub
-    }
+    const payload = await auth.verifyAccessToken(token)
+    if (payload) return payload.sub
   }
 
   return null
